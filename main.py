@@ -27,6 +27,15 @@ PRIMARY_SCRIPT_URL = os.getenv("PRIMARY_SCRIPT_URL", "").strip()
 TELEGRAM_SCRIPT_URLS = _parse_urls(os.getenv("TELEGRAM_SCRIPT_URLS", ""))
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
+CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
+CORS_ALLOW_HEADERS = (
+    os.getenv(
+        "CORS_ALLOW_HEADERS",
+        "Content-Type, X-Webhook-Secret, Authorization, X-Telegram-Bot-Api-Secret-Token",
+    ).strip()
+    or "Content-Type"
+)
+CORS_MAX_AGE_SEC = max(60, _env_int("CORS_MAX_AGE_SEC", 600))
 
 
 def _payload_dict() -> Dict:
@@ -107,6 +116,17 @@ def _post_json(url: str, payload: Dict, source: str, extra_params: Optional[Dict
     )
 
 
+def _resolve_cors_allow_origin() -> str:
+    origin = str(request.headers.get("Origin", "")).strip()
+    if "*" in CORS_ALLOWED_ORIGINS:
+        return "*"
+    if origin and origin in CORS_ALLOWED_ORIGINS:
+        return origin
+    if not origin and CORS_ALLOWED_ORIGINS:
+        return CORS_ALLOWED_ORIGINS[0]
+    return ""
+
+
 def _telegram_backends() -> List[str]:
     if TELEGRAM_SCRIPT_URLS:
         return TELEGRAM_SCRIPT_URLS
@@ -176,6 +196,27 @@ def home() -> Response:
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
     )
+
+
+@app.after_request
+def add_cors_headers(response: Response) -> Response:
+    allow_origin = _resolve_cors_allow_origin()
+    if allow_origin:
+        response.headers["Access-Control-Allow-Origin"] = allow_origin
+        if allow_origin != "*":
+            response.headers["Vary"] = "Origin"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = CORS_ALLOW_HEADERS
+    response.headers["Access-Control-Max-Age"] = str(CORS_MAX_AGE_SEC)
+    return response
+
+
+@app.route("/webhook/telegram", methods=["OPTIONS"])
+@app.route("/webhook/sepay", methods=["OPTIONS"])
+@app.route("/webhook/lead", methods=["OPTIONS"])
+@app.route("/webhook", methods=["OPTIONS"])
+def webhook_options() -> Response:
+    return Response(status=204)
 
 
 @app.post("/webhook/telegram")

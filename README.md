@@ -13,6 +13,8 @@ Copy `.env.example` va dien:
 - `PRIMARY_SCRIPT_URL`: URL web app Apps Script chinh (bat buoc).
 - `TELEGRAM_SCRIPT_URLS`: danh sach URL Apps Script xu ly Telegram, cach nhau boi dau phay.
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
+- `CORS_ALLOWED_ORIGINS` (optional): danh sach domain web duoc phep goi lead webhook, cach nhau boi dau phay. Mac dinh `*`.
+- `CORS_ALLOW_HEADERS` (optional): header CORS cho phep. Mac dinh da bao gom `Content-Type` va header webhook secret.
 
 ## 2) Deploy tren Render
 
@@ -55,6 +57,8 @@ Cau hinh webhook SePay:
 Webhook lead:
 
 `https://<your-render-domain>/webhook/lead`
+
+Route nay da ho tro CORS + OPTIONS de browser form submit truc tiep bang `fetch`.
 
 ## 4) Tuong thich voi Apps Script hien tai
 
