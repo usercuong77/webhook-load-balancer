@@ -1,7 +1,6 @@
 import hashlib
-import json
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, Response, jsonify, request
@@ -62,6 +61,16 @@ def _with_source(url: str, source: str) -> str:
     return f"{url}{joiner}source={source}"
 
 
+def _append_query_params(url: str, params: Dict[str, str]) -> str:
+    out = url
+    for key, value in params.items():
+        if not value:
+            continue
+        joiner = "&" if "?" in out else "?"
+        out = f"{out}{joiner}{key}={value}"
+    return out
+
+
 def _forward_headers() -> Dict[str, str]:
     headers = {"Content-Type": "application/json"}
     if WEBHOOK_SHARED_SECRET:
@@ -69,8 +78,9 @@ def _forward_headers() -> Dict[str, str]:
     return headers
 
 
-def _post_json(url: str, payload: Dict, source: str) -> requests.Response:
+def _post_json(url: str, payload: Dict, source: str, extra_params: Optional[Dict[str, str]] = None) -> requests.Response:
     target = _with_source(url, source)
+    target = _append_query_params(target, extra_params or {})
     return requests.post(
         target,
         json=payload,
@@ -100,16 +110,26 @@ def _ordered_telegram_urls(payload: Dict) -> List[str]:
     return urls[start:] + urls[:start]
 
 
+def _telegram_forward_params() -> Dict[str, str]:
+    # Preserve the bot/profile hint so one Render endpoint can serve main, buff, and uid bots.
+    for key in ("bot", "tg_bot", "profile"):
+        value = request.args.get(key, "").strip()
+        if value:
+            return {"bot": value}
+    return {}
+
+
 def _forward_telegram(payload: Dict) -> Tuple[bool, List[Dict]]:
+    forward_params = _telegram_forward_params()
     attempts = []
     for url in _ordered_telegram_urls(payload):
         try:
-            resp = _post_json(url, payload, "telegram")
-            attempts.append({"url": url, "status": resp.status_code})
+            resp = _post_json(url, payload, "telegram", forward_params)
+            attempts.append({"url": _append_query_params(url, forward_params), "status": resp.status_code})
             if 200 <= resp.status_code < 300:
                 return True, attempts
         except Exception as exc:
-            attempts.append({"url": url, "error": str(exc)})
+            attempts.append({"url": _append_query_params(url, forward_params), "error": str(exc)})
     return False, attempts
 
 

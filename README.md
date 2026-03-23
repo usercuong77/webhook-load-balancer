@@ -32,6 +32,12 @@ Set webhook Telegram tro den:
 
 `https://<your-render-domain>/webhook/telegram`
 
+Neu ban dung nhieu bot Telegram chung 1 Render service, them hint vao URL webhook:
+
+- Bot chinh: `https://<your-render-domain>/webhook/telegram`
+- Bot buff: `https://<your-render-domain>/webhook/telegram?bot=buff`
+- Bot UID: `https://<your-render-domain>/webhook/telegram?bot=uid`
+
 Neu can set secret token phia Telegram:
 
 `.../setWebhook?url=https://<your-render-domain>/webhook/telegram&secret_token=<token>`
