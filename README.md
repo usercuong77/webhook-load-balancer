@@ -11,7 +11,11 @@ Service nay dung cho luong webhook cua bot:
 Copy `.env.example` va dien:
 
 - `PRIMARY_SCRIPT_URL`: URL web app Apps Script chinh (bat buoc).
+- `SCRIPT_BACKEND_URLS` (optional): danh sach backend Apps Script dung chung cho failover (script1 loi/quota -> script2).
 - `TELEGRAM_SCRIPT_URLS`: danh sach URL Apps Script xu ly Telegram, cach nhau boi dau phay.
+- `LEAD_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook lead.
+- `SEPAY_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook SePay.
+- `SEPAY_FAILOVER_ENABLED` (optional, mac dinh `0`): bat failover SePay (can than duplicate neu du lieu dedupe khong chia se).
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
 - `CORS_ALLOWED_ORIGINS` (optional): danh sach domain web duoc phep goi lead webhook, cach nhau boi dau phay. Mac dinh `*`.
 - `CORS_ALLOW_HEADERS` (optional): header CORS cho phep. Mac dinh da bao gom `Content-Type` va header webhook secret.
@@ -45,6 +49,7 @@ Neu can set secret token phia Telegram:
 `.../setWebhook?url=https://<your-render-domain>/webhook/telegram&secret_token=<token>`
 
 Luu y: secret token cua Telegram khac voi `WEBHOOK_SHARED_SECRET` cua LB->Apps Script.
+LB da ho tro failover khi backend Telegram bi loi/het quota.
 
 ### SePay
 
@@ -59,6 +64,7 @@ Webhook lead:
 `https://<your-render-domain>/webhook/lead`
 
 Route nay da ho tro CORS + OPTIONS de browser form submit truc tiep bang `fetch`.
+LB da ho tro failover lead backend (neu cau hinh nhieu URL).
 
 ## 4) Tuong thich voi Apps Script hien tai
 

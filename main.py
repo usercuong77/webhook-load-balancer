@@ -23,8 +23,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 PRIMARY_SCRIPT_URL = os.getenv("PRIMARY_SCRIPT_URL", "").strip()
 TELEGRAM_SCRIPT_URLS = _parse_urls(os.getenv("TELEGRAM_SCRIPT_URLS", ""))
+SCRIPT_BACKEND_URLS = _parse_urls(os.getenv("SCRIPT_BACKEND_URLS", ""))
+LEAD_SCRIPT_URLS = _parse_urls(os.getenv("LEAD_SCRIPT_URLS", ""))
+SEPAY_SCRIPT_URLS = _parse_urls(os.getenv("SEPAY_SCRIPT_URLS", ""))
+SEPAY_FAILOVER_ENABLED = _env_bool("SEPAY_FAILOVER_ENABLED", False)
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
@@ -127,12 +136,44 @@ def _resolve_cors_allow_origin() -> str:
     return ""
 
 
-def _telegram_backends() -> List[str]:
-    if TELEGRAM_SCRIPT_URLS:
-        return TELEGRAM_SCRIPT_URLS
+def _unique_urls(urls: List[str]) -> List[str]:
+    out = []
+    seen = set()
+    for item in urls:
+        val = str(item or "").strip()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        out.append(val)
+    return out
+
+
+def _default_script_backends() -> List[str]:
+    if SCRIPT_BACKEND_URLS:
+        return _unique_urls(SCRIPT_BACKEND_URLS)
     if PRIMARY_SCRIPT_URL:
         return [PRIMARY_SCRIPT_URL]
     return []
+
+
+def _telegram_backends() -> List[str]:
+    if TELEGRAM_SCRIPT_URLS:
+        return _unique_urls(TELEGRAM_SCRIPT_URLS)
+    return _default_script_backends()
+
+
+def _lead_backends() -> List[str]:
+    if LEAD_SCRIPT_URLS:
+        return _unique_urls(LEAD_SCRIPT_URLS)
+    return _default_script_backends()
+
+
+def _sepay_backends() -> List[str]:
+    if SEPAY_SCRIPT_URLS:
+        return _unique_urls(SEPAY_SCRIPT_URLS)
+    if PRIMARY_SCRIPT_URL:
+        return [PRIMARY_SCRIPT_URL]
+    return _default_script_backends()
 
 
 def _ordered_telegram_urls(payload: Dict) -> List[str]:
@@ -144,6 +185,34 @@ def _ordered_telegram_urls(payload: Dict) -> List[str]:
         return urls
 
     hash_val = int(hashlib.sha256(update_id.encode("utf-8")).hexdigest(), 16)
+    start = hash_val % len(urls)
+    return urls[start:] + urls[:start]
+
+
+def _ordered_urls(urls: List[str], payload: Dict, source: str) -> List[str]:
+    if len(urls) <= 1:
+        return urls
+
+    key_candidates = [
+        payload.get("update_id"),
+        payload.get("id"),
+        payload.get("transaction_id"),
+        payload.get("transactionId"),
+        payload.get("referenceCode"),
+        payload.get("reference_code"),
+        payload.get("phone"),
+        payload.get("chatId"),
+    ]
+    key = ""
+    for item in key_candidates:
+        val = str(item or "").strip()
+        if val:
+            key = val
+            break
+    if not key:
+        key = json.dumps(payload, ensure_ascii=False, sort_keys=True)[:400]
+
+    hash_val = int(hashlib.sha256(f"{source}:{key}".encode("utf-8")).hexdigest(), 16)
     start = hash_val % len(urls)
     return urls[start:] + urls[:start]
 
@@ -171,6 +240,54 @@ def _forward_telegram(payload: Dict) -> Tuple[bool, List[Dict]]:
     return False, attempts
 
 
+def _response_body_contains_quota_error(body_text: str) -> bool:
+    text = (body_text or "").lower()
+    if not text:
+        return False
+    return (
+        "service invoked too many times for one day: urlfetch" in text
+        or "too many times for one day: urlfetch" in text
+        or "limit exceeded: url fetch" in text
+        or "quota exceeded" in text
+    )
+
+
+def _response_is_retryable_failure(resp: requests.Response, body_text: str) -> bool:
+    status = int(resp.status_code)
+    if status in (408, 425, 429, 500, 502, 503, 504):
+        return True
+    if status < 200 or status >= 300:
+        return False
+    return _response_body_contains_quota_error(body_text)
+
+
+def _forward_with_failover(
+    source: str,
+    payload: Dict,
+    urls: List[str],
+    extra_params: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, List[Dict]]:
+    if not urls:
+        return False, [{"error": "No backend URL configured"}]
+
+    attempts = []
+    for url in _ordered_urls(urls, payload, source):
+        try:
+            resp = _post_json(url, payload, source, extra_params)
+            body_text = (resp.text or "")[:1200]
+            attempt = {
+                "url": _append_query_params(url, extra_params or {}),
+                "status": int(resp.status_code),
+                "body": body_text,
+            }
+            attempts.append(attempt)
+            if not _response_is_retryable_failure(resp, body_text):
+                return 200 <= int(resp.status_code) < 300, attempts
+        except Exception as exc:
+            attempts.append({"url": _append_query_params(url, extra_params or {}), "error": str(exc)})
+    return False, attempts
+
+
 def _forward_single(source: str, payload: Dict) -> Tuple[bool, Dict]:
     if not PRIMARY_SCRIPT_URL:
         return False, {"error": "PRIMARY_SCRIPT_URL is not configured"}
@@ -193,6 +310,7 @@ def home() -> Response:
             "ok": True,
             "service": "apps-script-webhook-load-balancer",
             "telegram_backends": len(_telegram_backends()),
+            "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
     )
@@ -230,6 +348,11 @@ def webhook_telegram() -> Response:
 @app.post("/webhook/sepay")
 def webhook_sepay() -> Response:
     payload = _payload_dict()
+    if SEPAY_FAILOVER_ENABLED:
+        ok, attempts = _forward_with_failover("sepay", payload, _sepay_backends())
+        status = 200 if ok else 502
+        return jsonify({"ok": ok, "source": "sepay", "attempts": attempts}), status
+
     ok, detail = _forward_single("sepay", payload)
     # Keep non-200 if upstream fails so SePay can retry.
     status = 200 if ok else 502
@@ -239,9 +362,9 @@ def webhook_sepay() -> Response:
 @app.post("/webhook/lead")
 def webhook_lead() -> Response:
     payload = _payload_dict()
-    ok, detail = _forward_single("lead", payload)
+    ok, attempts = _forward_with_failover("lead", payload, _lead_backends())
     status = 200 if ok else 502
-    return jsonify({"ok": ok, "source": "lead", "detail": detail}), status
+    return jsonify({"ok": ok, "source": "lead", "attempts": attempts}), status
 
 
 @app.post("/webhook")
