@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: bot-webhook-load-balancer
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -k gthread -b 0.0.0.0:$PORT main:app
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: REQUEST_TIMEOUT_SEC
+        value: "25"
+      - key: PRIMARY_SCRIPT_URL
+        sync: false
+      - key: TELEGRAM_SCRIPT_URLS
+        sync: false
+      - key: WEBHOOK_SHARED_SECRET
+        sync: false
