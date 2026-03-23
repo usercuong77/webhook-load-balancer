@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from typing import Dict, List, Optional, Tuple
 
@@ -26,6 +27,23 @@ PRIMARY_SCRIPT_URL = os.getenv("PRIMARY_SCRIPT_URL", "").strip()
 TELEGRAM_SCRIPT_URLS = _parse_urls(os.getenv("TELEGRAM_SCRIPT_URLS", ""))
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
+
+
+def _payload_dict() -> Dict:
+    parsed = request.get_json(silent=True)
+    if isinstance(parsed, dict):
+        return parsed
+
+    raw = request.get_data(as_text=True) or ""
+    if raw:
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, dict):
+                return decoded
+        except Exception:
+            pass
+
+    return {}
 
 
 def _is_telegram_payload(payload: Dict) -> bool:
@@ -162,7 +180,7 @@ def home() -> Response:
 
 @app.post("/webhook/telegram")
 def webhook_telegram() -> Response:
-    payload = request.get_json(silent=True) or {}
+    payload = _payload_dict()
     ok, attempts = _forward_telegram(payload)
     # Telegram route always returns 200 to avoid aggressive retry storms.
     return jsonify({"ok": ok, "source": "telegram", "attempts": attempts}), 200
@@ -170,7 +188,7 @@ def webhook_telegram() -> Response:
 
 @app.post("/webhook/sepay")
 def webhook_sepay() -> Response:
-    payload = request.get_json(silent=True) or {}
+    payload = _payload_dict()
     ok, detail = _forward_single("sepay", payload)
     # Keep non-200 if upstream fails so SePay can retry.
     status = 200 if ok else 502
@@ -179,7 +197,7 @@ def webhook_sepay() -> Response:
 
 @app.post("/webhook/lead")
 def webhook_lead() -> Response:
-    payload = request.get_json(silent=True) or {}
+    payload = _payload_dict()
     ok, detail = _forward_single("lead", payload)
     status = 200 if ok else 502
     return jsonify({"ok": ok, "source": "lead", "detail": detail}), status
@@ -187,7 +205,7 @@ def webhook_lead() -> Response:
 
 @app.post("/webhook")
 def webhook_auto() -> Response:
-    payload = request.get_json(silent=True) or {}
+    payload = _payload_dict()
     if _is_telegram_payload(payload):
         return webhook_telegram()
     if _is_sepay_payload(payload):
