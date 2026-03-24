@@ -17,6 +17,8 @@ Copy `.env.example` va dien:
 - `SEPAY_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook SePay.
 - `SEPAY_FAILOVER_ENABLED` (optional, mac dinh `0`): bat failover SePay (can than duplicate neu du lieu dedupe khong chia se).
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
+- `TELEGRAM_ASYNC_ENABLED` (optional, mac dinh `1`): tra `200` ngay cho Telegram, forward webhook o background de tranh timeout.
+- `TELEGRAM_ASYNC_WORKERS` (optional, mac dinh `8`): so worker async cho Telegram.
 - `CORS_ALLOWED_ORIGINS` (optional): danh sach domain web duoc phep goi lead webhook, cach nhau boi dau phay. Mac dinh `*`.
 - `CORS_ALLOW_HEADERS` (optional): header CORS cho phep. Mac dinh da bao gom `Content-Type` va header webhook secret.
 
@@ -50,6 +52,7 @@ Neu can set secret token phia Telegram:
 
 Luu y: secret token cua Telegram khac voi `WEBHOOK_SHARED_SECRET` cua LB->Apps Script.
 LB da ho tro failover khi backend Telegram bi loi/het quota.
+Mac dinh LB se ack Telegram ngay va forward nen, giam nguy co `Read timeout expired` khi Render cold start hoac Apps Script cham.
 
 ### SePay
 

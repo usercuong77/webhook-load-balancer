@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -36,6 +37,8 @@ SEPAY_SCRIPT_URLS = _parse_urls(os.getenv("SEPAY_SCRIPT_URLS", ""))
 SEPAY_FAILOVER_ENABLED = _env_bool("SEPAY_FAILOVER_ENABLED", False)
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
+TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
+TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -45,6 +48,7 @@ CORS_ALLOW_HEADERS = (
     or "Content-Type"
 )
 CORS_MAX_AGE_SEC = max(60, _env_int("CORS_MAX_AGE_SEC", 600))
+TELEGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=TELEGRAM_ASYNC_WORKERS)
 
 
 def _payload_dict() -> Dict:
@@ -217,7 +221,7 @@ def _ordered_urls(urls: List[str], payload: Dict, source: str) -> List[str]:
     return urls[start:] + urls[:start]
 
 
-def _telegram_forward_params() -> Dict[str, str]:
+def _telegram_forward_params_from_request() -> Dict[str, str]:
     # Preserve the bot/profile hint so one Render endpoint can serve main, buff, and uid bots.
     for key in ("bot", "tg_bot", "profile"):
         value = request.args.get(key, "").strip()
@@ -226,18 +230,27 @@ def _telegram_forward_params() -> Dict[str, str]:
     return {}
 
 
-def _forward_telegram(payload: Dict) -> Tuple[bool, List[Dict]]:
-    forward_params = _telegram_forward_params()
+def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
+    params = forward_params or {}
     attempts = []
     for url in _ordered_telegram_urls(payload):
         try:
-            resp = _post_json(url, payload, "telegram", forward_params)
-            attempts.append({"url": _append_query_params(url, forward_params), "status": resp.status_code})
+            resp = _post_json(url, payload, "telegram", params)
+            attempts.append({"url": _append_query_params(url, params), "status": resp.status_code})
             if 200 <= resp.status_code < 300:
                 return True, attempts
         except Exception as exc:
-            attempts.append({"url": _append_query_params(url, forward_params), "error": str(exc)})
+            attempts.append({"url": _append_query_params(url, params), "error": str(exc)})
     return False, attempts
+
+
+def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) -> None:
+    try:
+        ok, attempts = _forward_telegram(payload, forward_params)
+        if not ok:
+            app.logger.error("Telegram async forward failed: %s", json.dumps(attempts, ensure_ascii=False))
+    except Exception:
+        app.logger.exception("Telegram async forward crashed")
 
 
 def _response_body_contains_quota_error(body_text: str) -> bool:
@@ -310,6 +323,7 @@ def home() -> Response:
             "ok": True,
             "service": "apps-script-webhook-load-balancer",
             "telegram_backends": len(_telegram_backends()),
+            "telegram_async": TELEGRAM_ASYNC_ENABLED,
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
@@ -340,7 +354,13 @@ def webhook_options() -> Response:
 @app.post("/webhook/telegram")
 def webhook_telegram() -> Response:
     payload = _payload_dict()
-    ok, attempts = _forward_telegram(payload)
+    forward_params = _telegram_forward_params_from_request()
+    if TELEGRAM_ASYNC_ENABLED:
+        # Ack Telegram immediately to avoid webhook timeouts on cold start or slow Apps Script runs.
+        TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
+        return jsonify({"ok": True, "accepted": True, "async": True, "source": "telegram"}), 200
+
+    ok, attempts = _forward_telegram(payload, forward_params)
     # Telegram route always returns 200 to avoid aggressive retry storms.
     return jsonify({"ok": ok, "source": "telegram", "attempts": attempts}), 200
 
