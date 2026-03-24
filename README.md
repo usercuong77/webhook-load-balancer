@@ -56,6 +56,8 @@ Neu can set secret token phia Telegram:
 Luu y: secret token cua Telegram khac voi `WEBHOOK_SHARED_SECRET` cua LB->Apps Script.
 LB da ho tro failover khi backend Telegram bi loi/het quota/timeout.
 Mac dinh LB se ack Telegram ngay va forward nen, giam nguy co `Read timeout expired` khi Render cold start hoac Apps Script cham.
+Telegram chi duoc xem la thanh cong khi upstream tra JSON hop le voi `ok: true`.
+Neu upstream tra HTML (access denied) hoac JSON `ok: false`, LB se tiep tuc failover sang backend tiep theo.
 
 Neu muc tieu la giam quota cho app chinh (app chinh giu SePay + task he thong):
 

@@ -232,6 +232,7 @@ def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = 
         _telegram_backends(),
         extra_params=params,
         retry_on_any_non_2xx=True,
+        require_json_ok_true=True,
     )
 
 
@@ -256,17 +257,33 @@ def _response_body_contains_quota_error(body_text: str) -> bool:
     )
 
 
+def _response_body_has_json_ok_true(body_text: str) -> bool:
+    text = (body_text or "").strip()
+    if not text:
+        return False
+    try:
+        data = json.loads(text)
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get("ok") is True
+
+
 def _response_is_retryable_failure(
     resp: requests.Response,
     body_text: str,
     retry_on_any_non_2xx: bool = False,
+    require_json_ok_true: bool = False,
 ) -> bool:
     status = int(resp.status_code)
     if status in (408, 425, 429, 500, 502, 503, 504):
         return True
     if status < 200 or status >= 300:
         return retry_on_any_non_2xx
-    return _response_body_contains_quota_error(body_text)
+    if _response_body_contains_quota_error(body_text):
+        return True
+    if require_json_ok_true and not _response_body_has_json_ok_true(body_text):
+        return True
+    return False
 
 
 def _forward_with_failover(
@@ -275,6 +292,7 @@ def _forward_with_failover(
     urls: List[str],
     extra_params: Optional[Dict[str, str]] = None,
     retry_on_any_non_2xx: bool = False,
+    require_json_ok_true: bool = False,
 ) -> Tuple[bool, List[Dict]]:
     if not urls:
         return False, [{"error": "No backend URL configured"}]
@@ -290,7 +308,12 @@ def _forward_with_failover(
                 "body": body_text,
             }
             attempts.append(attempt)
-            if not _response_is_retryable_failure(resp, body_text, retry_on_any_non_2xx):
+            if not _response_is_retryable_failure(
+                resp,
+                body_text,
+                retry_on_any_non_2xx=retry_on_any_non_2xx,
+                require_json_ok_true=require_json_ok_true,
+            ):
                 return 200 <= int(resp.status_code) < 300, attempts
         except Exception as exc:
             attempts.append({"url": _append_query_params(url, extra_params or {}), "error": str(exc)})
