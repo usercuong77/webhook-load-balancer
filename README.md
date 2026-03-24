@@ -2,7 +2,7 @@
 
 Service nay dung cho luong webhook cua bot:
 
-- Telegram: fanout theo `update_id` (deterministic) qua nhieu URL Apps Script.
+- Telegram: failover qua nhieu URL Apps Script.
 - SePay: always forward ve `PRIMARY_SCRIPT_URL` duy nhat.
 - Lead form: forward ve `PRIMARY_SCRIPT_URL`.
 
@@ -19,6 +19,9 @@ Copy `.env.example` va dien:
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
 - `TELEGRAM_ASYNC_ENABLED` (optional, mac dinh `1`): tra `200` ngay cho Telegram, forward webhook o background de tranh timeout.
 - `TELEGRAM_ASYNC_WORKERS` (optional, mac dinh `8`): so worker async cho Telegram.
+- `TELEGRAM_FAILOVER_STRATEGY` (optional, mac dinh `priority`):
+  - `priority`: uu tien URL dau tien trong `TELEGRAM_SCRIPT_URLS`, loi/quota/timeout thi chuyen URL tiep theo.
+  - `hash`: phan tan deterministic theo `update_id`.
 - `CORS_ALLOWED_ORIGINS` (optional): danh sach domain web duoc phep goi lead webhook, cach nhau boi dau phay. Mac dinh `*`.
 - `CORS_ALLOW_HEADERS` (optional): header CORS cho phep. Mac dinh da bao gom `Content-Type` va header webhook secret.
 
@@ -51,8 +54,14 @@ Neu can set secret token phia Telegram:
 `.../setWebhook?url=https://<your-render-domain>/webhook/telegram&secret_token=<token>`
 
 Luu y: secret token cua Telegram khac voi `WEBHOOK_SHARED_SECRET` cua LB->Apps Script.
-LB da ho tro failover khi backend Telegram bi loi/het quota.
+LB da ho tro failover khi backend Telegram bi loi/het quota/timeout.
 Mac dinh LB se ack Telegram ngay va forward nen, giam nguy co `Read timeout expired` khi Render cold start hoac Apps Script cham.
+
+Neu muc tieu la giam quota cho app chinh (app chinh giu SePay + task he thong):
+
+- Khong dua `PRIMARY_SCRIPT_URL` vao `TELEGRAM_SCRIPT_URLS`.
+- Dat `TELEGRAM_SCRIPT_URLS` chi gom app phu theo thu tu uu tien.
+- Dat `TELEGRAM_FAILOVER_STRATEGY=priority`.
 
 ### SePay
 

@@ -39,6 +39,9 @@ REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
 TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
 TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
+TELEGRAM_FAILOVER_STRATEGY = str(os.getenv("TELEGRAM_FAILOVER_STRATEGY", "priority")).strip().lower()
+if TELEGRAM_FAILOVER_STRATEGY not in ("priority", "hash"):
+    TELEGRAM_FAILOVER_STRATEGY = "priority"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -180,21 +183,12 @@ def _sepay_backends() -> List[str]:
     return _default_script_backends()
 
 
-def _ordered_telegram_urls(payload: Dict) -> List[str]:
-    urls = _telegram_backends()
-    if not urls:
-        return []
-    update_id = str(payload.get("update_id", "")).strip()
-    if not update_id:
-        return urls
-
-    hash_val = int(hashlib.sha256(update_id.encode("utf-8")).hexdigest(), 16)
-    start = hash_val % len(urls)
-    return urls[start:] + urls[:start]
-
-
 def _ordered_urls(urls: List[str], payload: Dict, source: str) -> List[str]:
     if len(urls) <= 1:
+        return urls
+
+    if source == "telegram" and TELEGRAM_FAILOVER_STRATEGY == "priority":
+        # Strict ordered failover: backend 1 -> backend 2 -> backend 3
         return urls
 
     key_candidates = [
@@ -232,16 +226,13 @@ def _telegram_forward_params_from_request() -> Dict[str, str]:
 
 def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
     params = forward_params or {}
-    attempts = []
-    for url in _ordered_telegram_urls(payload):
-        try:
-            resp = _post_json(url, payload, "telegram", params)
-            attempts.append({"url": _append_query_params(url, params), "status": resp.status_code})
-            if 200 <= resp.status_code < 300:
-                return True, attempts
-        except Exception as exc:
-            attempts.append({"url": _append_query_params(url, params), "error": str(exc)})
-    return False, attempts
+    return _forward_with_failover(
+        "telegram",
+        payload,
+        _telegram_backends(),
+        extra_params=params,
+        retry_on_any_non_2xx=True,
+    )
 
 
 def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) -> None:
@@ -265,12 +256,16 @@ def _response_body_contains_quota_error(body_text: str) -> bool:
     )
 
 
-def _response_is_retryable_failure(resp: requests.Response, body_text: str) -> bool:
+def _response_is_retryable_failure(
+    resp: requests.Response,
+    body_text: str,
+    retry_on_any_non_2xx: bool = False,
+) -> bool:
     status = int(resp.status_code)
     if status in (408, 425, 429, 500, 502, 503, 504):
         return True
     if status < 200 or status >= 300:
-        return False
+        return retry_on_any_non_2xx
     return _response_body_contains_quota_error(body_text)
 
 
@@ -279,6 +274,7 @@ def _forward_with_failover(
     payload: Dict,
     urls: List[str],
     extra_params: Optional[Dict[str, str]] = None,
+    retry_on_any_non_2xx: bool = False,
 ) -> Tuple[bool, List[Dict]]:
     if not urls:
         return False, [{"error": "No backend URL configured"}]
@@ -294,7 +290,7 @@ def _forward_with_failover(
                 "body": body_text,
             }
             attempts.append(attempt)
-            if not _response_is_retryable_failure(resp, body_text):
+            if not _response_is_retryable_failure(resp, body_text, retry_on_any_non_2xx):
                 return 200 <= int(resp.status_code) < 300, attempts
         except Exception as exc:
             attempts.append({"url": _append_query_params(url, extra_params or {}), "error": str(exc)})
@@ -324,6 +320,7 @@ def home() -> Response:
             "service": "apps-script-webhook-load-balancer",
             "telegram_backends": len(_telegram_backends()),
             "telegram_async": TELEGRAM_ASYNC_ENABLED,
+            "telegram_failover_strategy": TELEGRAM_FAILOVER_STRATEGY,
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
