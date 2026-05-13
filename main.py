@@ -346,6 +346,7 @@ def home() -> Response:
             "telegram_backends": len(_telegram_backends()),
             "telegram_async": TELEGRAM_ASYNC_ENABLED,
             "telegram_failover_strategy": TELEGRAM_FAILOVER_STRATEGY,
+            "telegram_retry_on_json_ok_false": False,
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
