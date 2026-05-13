@@ -232,7 +232,9 @@ def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = 
         _telegram_backends(),
         extra_params=params,
         retry_on_any_non_2xx=True,
-        require_json_ok_true=True,
+        # Telegram commands have side effects (sendMessage/editMessage) before Apps Script returns.
+        # Retrying on JSON ok:false can duplicate menus/orders, so only fail over on HTTP/transport/quota errors.
+        require_json_ok_true=False,
     )
 
 
