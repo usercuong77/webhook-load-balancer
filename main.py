@@ -225,17 +225,33 @@ def _telegram_forward_params_from_request() -> Dict[str, str]:
 
 
 def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
+    urls = _ordered_urls(_telegram_backends(), payload, "telegram")
+    if not urls:
+        return False, [{"error": "No backend URL configured"}]
+
+    # Telegram commands are not safe to retry across Apps Script backends:
+    # Apps Script can send Telegram messages before Render sees a timeout/error.
+    # Retrying would duplicate menus/orders, so one update is delivered to one backend only.
+    target_url = urls[0]
     params = forward_params or {}
-    return _forward_with_failover(
-        "telegram",
-        payload,
-        _telegram_backends(),
-        extra_params=params,
-        retry_on_any_non_2xx=True,
-        # Telegram commands have side effects (sendMessage/editMessage) before Apps Script returns.
-        # Retrying on JSON ok:false can duplicate menus/orders, so only fail over on HTTP/transport/quota errors.
-        require_json_ok_true=False,
-    )
+    try:
+        resp = _post_json(target_url, payload, "telegram", params)
+        body_text = (resp.text or "")[:1200]
+        return (
+            200 <= int(resp.status_code) < 300,
+            [{
+                "url": _append_query_params(target_url, params),
+                "status": int(resp.status_code),
+                "body": body_text,
+                "single_delivery": True,
+            }],
+        )
+    except Exception as exc:
+        return False, [{
+            "url": _append_query_params(target_url, params),
+            "error": str(exc),
+            "single_delivery": True,
+        }]
 
 
 def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) -> None:
@@ -346,6 +362,7 @@ def home() -> Response:
             "telegram_backends": len(_telegram_backends()),
             "telegram_async": TELEGRAM_ASYNC_ENABLED,
             "telegram_failover_strategy": TELEGRAM_FAILOVER_STRATEGY,
+            "telegram_delivery_mode": "single_backend_no_retry",
             "telegram_retry_on_json_ok_false": False,
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
