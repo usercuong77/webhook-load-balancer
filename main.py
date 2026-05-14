@@ -144,6 +144,7 @@ UID_CHECKER_ENABLED = _env_bool("UID_CHECKER_ENABLED", True)
 UID_CHECKER_API_KEY = (
     os.getenv("UID_CHECKER_API_KEY", "").strip()
     or os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
+    or "abc123"
 )
 TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
 TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))

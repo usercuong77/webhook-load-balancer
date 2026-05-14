@@ -17,7 +17,7 @@ Copy `.env.example` va dien:
 - `SEPAY_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook SePay.
 - `SEPAY_FAILOVER_ENABLED` (optional, mac dinh `0`): bat failover SePay (can than duplicate neu du lieu dedupe khong chia se).
 - `UID_CHECKER_ENABLED` (optional, mac dinh `1`): bat endpoint checker tich hop trong LB.
-- `UID_CHECKER_API_KEY` (optional): API key bao ve `/check`, `/get-uid`, `/latest-post`, `/cookie-health`. Nen dat cung gia tri voi `EXTERNAL_CHECKER_API_KEY` trong Apps Script.
+- `UID_CHECKER_API_KEY` (optional): API key bao ve `/check`, `/get-uid`, `/latest-post`, `/cookie-health`. Nen dat cung gia tri voi `EXTERNAL_CHECKER_API_KEY` trong Apps Script. Neu chua set env, service dung legacy fallback de khong lam gian doan bot.
 - `UID_CHECKER_TIMEOUT` (optional, mac dinh `10`): timeout goi Facebook public probe.
 - `LATEST_POST_TOTAL_TIMEOUT` (optional, mac dinh `15`): timeout tong cho `/latest-post` va `/checkpost`.
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
