@@ -19,6 +19,10 @@ Copy `.env.example` va dien:
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
 - `TELEGRAM_ASYNC_ENABLED` (optional, mac dinh `1`): tra `200` ngay cho Telegram, forward webhook o background de tranh timeout.
 - `TELEGRAM_ASYNC_WORKERS` (optional, mac dinh `8`): so worker async cho Telegram.
+- `TELEGRAM_LOADING_ENABLED` (optional, mac dinh `1`): Render gui ngay tin `Dang chay...` truoc khi forward sang Apps Script.
+- `TELEGRAM_LOADING_TEXT` (optional): noi dung loading, mac dinh `Dang chay...`.
+- `TELEGRAM_BOT_TOKEN` (optional): token bot mac dinh de Render gui loading.
+- `TELEGRAM_BOT_TOKEN_MAP` (optional): JSON map token theo bot hint, vi du `{"main":"...","buff":"...","uid":"..."}`.
 - `TELEGRAM_FAILOVER_STRATEGY` (optional, mac dinh `priority`):
   - `priority`: luon chon URL dau tien trong `TELEGRAM_SCRIPT_URLS`.
   - `hash`: phan tan deterministic theo `update_id`, moi update van chi gui 1 backend.
@@ -58,6 +62,9 @@ LB khong retry Telegram sang backend khac neu backend dau tien timeout/loi.
 Ly do: lenh Telegram co side effect, Apps Script co the da gui tin nhan truoc khi Render thay timeout.
 Mac dinh LB se ack Telegram ngay va forward nen, giam nguy co `Read timeout expired` khi Render cold start hoac Apps Script cham.
 Neu can chia tai Telegram, dung `TELEGRAM_FAILOVER_STRATEGY=hash`; khong dung retry/failover theo timeout cho Telegram.
+
+Neu bat `TELEGRAM_LOADING_ENABLED=1` va da set token, LB se gui tin `Dang chay...` ngay lap tuc roi truyen `loading_message_id` ve Apps Script.
+Apps Script se khong tao loading trung; lenh thuong se xoa tin loading khi xu ly xong, rieng `/viplike` se tan dung tin loading do lam workflow message.
 
 Neu muc tieu la giam quota cho app chinh (app chinh giu SePay + task he thong):
 

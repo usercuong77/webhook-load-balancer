@@ -30,6 +30,14 @@ services:
         value: "8"
       - key: TELEGRAM_FAILOVER_STRATEGY
         value: "priority"
+      - key: TELEGRAM_LOADING_ENABLED
+        value: "1"
+      - key: TELEGRAM_LOADING_TEXT
+        value: "Đang chạy..."
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN_MAP
+        sync: false
       - key: CORS_ALLOWED_ORIGINS
         sync: false
       - key: CORS_ALLOW_HEADERS

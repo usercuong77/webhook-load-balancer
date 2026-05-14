@@ -86,6 +86,38 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _env_json_dict(name: str) -> Dict:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_telegram_bot_token_map() -> Dict[str, str]:
+    mapping = {}
+    for key, value in _env_json_dict("TELEGRAM_BOT_TOKEN_MAP").items():
+        token = str(value or "").strip()
+        if token:
+            mapping[str(key).strip().lower()] = token
+
+    aliases = {
+        "main": ["TELEGRAM_BOT_TOKEN_MAIN", "TELEGRAM_BOT_TOKEN"],
+        "buff": ["TELEGRAM_BOT_TOKEN_BUFF", "CHILD_TELEGRAM_BOT_TOKEN", "BUFF_TELEGRAM_BOT_TOKEN"],
+        "uid": ["TELEGRAM_BOT_TOKEN_UID", "UID_TELEGRAM_BOT_TOKEN"],
+    }
+    for hint, env_names in aliases.items():
+        for env_name in env_names:
+            token = os.getenv(env_name, "").strip()
+            if token:
+                mapping[hint] = token
+                break
+    return mapping
+
+
 PRIMARY_SCRIPT_URL = os.getenv("PRIMARY_SCRIPT_URL", "").strip()
 TELEGRAM_SCRIPT_URLS = _parse_urls(os.getenv("TELEGRAM_SCRIPT_URLS", ""))
 SCRIPT_BACKEND_URLS = _parse_urls(os.getenv("SCRIPT_BACKEND_URLS", ""))
@@ -102,6 +134,10 @@ if TELEGRAM_FAILOVER_STRATEGY not in ("priority", "hash"):
 TELEGRAM_DEDUP_ENABLED = _env_bool("TELEGRAM_DEDUP_ENABLED", True)
 TELEGRAM_DEDUP_TTL_SEC = max(60, _env_int("TELEGRAM_DEDUP_TTL_SEC", 6 * 60 * 60))
 TELEGRAM_DEDUP_MAX_ITEMS = max(100, _env_int("TELEGRAM_DEDUP_MAX_ITEMS", 5000))
+TELEGRAM_LOADING_ENABLED = _env_bool("TELEGRAM_LOADING_ENABLED", True)
+TELEGRAM_LOADING_TEXT = os.getenv("TELEGRAM_LOADING_TEXT", "Đang chạy...").strip() or "Đang chạy..."
+TELEGRAM_LOADING_TIMEOUT_SEC = max(1, _env_int("TELEGRAM_LOADING_TIMEOUT_SEC", 4))
+TELEGRAM_BOT_TOKENS = _load_telegram_bot_token_map()
 DEBUG_LOG_VERSION = "step20_debug_logging_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
@@ -345,11 +381,94 @@ def _ordered_urls(urls: List[str], payload: Dict, source: str) -> List[str]:
 
 def _telegram_forward_params_from_request() -> Dict[str, str]:
     # Preserve the bot/profile hint so one Render endpoint can serve main, buff, and uid bots.
+    hint = _telegram_bot_hint_from_request()
+    return {"bot": hint} if hint else {}
+
+
+def _telegram_bot_hint_from_request() -> str:
     for key in ("bot", "tg_bot", "profile"):
-        value = request.args.get(key, "").strip()
+        value = request.args.get(key, "").strip().lower()
         if value:
-            return {"bot": value}
-    return {}
+            return value
+    return ""
+
+
+def _telegram_bot_token_for_hint(hint: str) -> str:
+    key = str(hint or "").strip().lower()
+    if key and key in TELEGRAM_BOT_TOKENS:
+        return TELEGRAM_BOT_TOKENS[key]
+    return TELEGRAM_BOT_TOKENS.get("main", "") or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
+
+def _telegram_text_message_target(payload: Dict) -> Tuple[str, str]:
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(message, dict):
+        return "", ""
+    text = str(message.get("text", "") or "").strip()
+    chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+    chat_id = str(chat.get("id", "") or "").strip()
+    if not chat_id or not text:
+        return "", ""
+    return chat_id, text
+
+
+def _send_telegram_loading_message(payload: Dict, bot_hint: str) -> Dict:
+    if not TELEGRAM_LOADING_ENABLED:
+        return {"ok": False, "skipped": True, "reason": "loading_disabled"}
+
+    chat_id, text = _telegram_text_message_target(payload)
+    if not chat_id or not text:
+        return {"ok": False, "skipped": True, "reason": "not_text_message"}
+
+    token = _telegram_bot_token_for_hint(bot_hint)
+    if not token:
+        return {"ok": False, "skipped": True, "reason": "telegram_token_missing"}
+
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": f"<i>{TELEGRAM_LOADING_TEXT}</i>",
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=TELEGRAM_LOADING_TIMEOUT_SEC,
+        )
+        body = resp.json() if resp.text else {}
+        message_id = 0
+        if isinstance(body, dict) and isinstance(body.get("result"), dict):
+            try:
+                message_id = int(body["result"].get("message_id") or 0)
+            except Exception:
+                message_id = 0
+        ok = 200 <= int(resp.status_code) < 300 and bool(body.get("ok", False))
+        if not ok:
+            _log_event(
+                "warning",
+                "telegram_loading",
+                "Telegram loading message failed",
+                code="telegram_loading_failed",
+                bot=bot_hint or "main",
+                http=int(resp.status_code),
+                body=(resp.text or "")[:600],
+            )
+        return {
+            "ok": ok,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "http": int(resp.status_code),
+        }
+    except Exception as exc:
+        _log_event(
+            "warning",
+            "telegram_loading",
+            "Telegram loading message exception",
+            code="telegram_loading_exception",
+            bot=bot_hint or "main",
+            error=str(exc),
+        )
+        return {"ok": False, "error": str(exc)}
 
 
 def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
@@ -536,6 +655,8 @@ def home() -> Response:
             "telegram_dedup_enabled": TELEGRAM_DEDUP_ENABLED,
             "telegram_dedup_ttl_sec": TELEGRAM_DEDUP_TTL_SEC,
             "telegram_dedup_cache_items": len(TELEGRAM_DEDUP_CACHE),
+            "telegram_loading_enabled": TELEGRAM_LOADING_ENABLED,
+            "telegram_loading_tokens": sorted(TELEGRAM_BOT_TOKENS.keys()),
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
@@ -585,7 +706,13 @@ def webhook_telegram() -> Response:
             "source": "telegram",
         }), 200
 
+    bot_hint = _telegram_bot_hint_from_request()
     forward_params = _telegram_forward_params_from_request()
+    loading = _send_telegram_loading_message(payload, bot_hint)
+    if loading.get("ok") and loading.get("message_id"):
+        forward_params["loading_message_id"] = str(loading.get("message_id"))
+        forward_params["loading_source"] = "render"
+
     if TELEGRAM_ASYNC_ENABLED:
         # Ack Telegram immediately to avoid webhook timeouts on cold start or slow Apps Script runs.
         TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
@@ -595,11 +722,18 @@ def webhook_telegram() -> Response:
             "async": True,
             "source": "telegram",
             "dedup_key": dedup_key,
+            "loading": bool(loading.get("ok")),
         }), 200
 
     ok, attempts = _forward_telegram(payload, forward_params)
     # Telegram route always returns 200 to avoid aggressive retry storms.
-    return jsonify({"ok": ok, "source": "telegram", "dedup_key": dedup_key, "attempts": attempts}), 200
+    return jsonify({
+        "ok": ok,
+        "source": "telegram",
+        "dedup_key": dedup_key,
+        "loading": bool(loading.get("ok")),
+        "attempts": attempts,
+    }), 200
 
 
 @app.post("/webhook/sepay")
