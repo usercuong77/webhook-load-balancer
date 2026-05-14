@@ -20,6 +20,11 @@ Copy `.env.example` va dien:
 - `UID_CHECKER_API_KEY` (optional): API key bao ve `/check`, `/get-uid`, `/latest-post`, `/cookie-health`. Nen dat cung gia tri voi `EXTERNAL_CHECKER_API_KEY` trong Apps Script. Neu chua set env, service dung legacy fallback de khong lam gian doan bot.
 - `UID_CHECKER_TIMEOUT` (optional, mac dinh `10`): timeout goi Facebook public probe.
 - `LATEST_POST_TOTAL_TIMEOUT` (optional, mac dinh `15`): timeout tong cho `/latest-post` va `/checkpost`.
+- `CHECKER_CACHE_ENABLED` (optional, mac dinh `1`): bat cache ngan han cho checker tich hop.
+- `CHECKER_GET_UID_CACHE_TTL_SEC` (optional, mac dinh `21600`): TTL cache resolve UID/profile.
+- `CHECKER_CHECK_CACHE_TTL_SEC` (optional, mac dinh `45`): TTL cache live/die.
+- `CHECKER_LATEST_POST_CACHE_TTL_SEC` (optional, mac dinh `55`): TTL cache latest post.
+- `CHECKER_CACHE_MAX_ITEMS` (optional, mac dinh `2000`): so item cache toi da trong RAM Render.
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
 - `TELEGRAM_ASYNC_ENABLED` (optional, mac dinh `1`): tra `200` ngay cho Telegram, forward webhook o background de tranh timeout.
 - `TELEGRAM_ASYNC_WORKERS` (optional, mac dinh `8`): so worker async cho Telegram.

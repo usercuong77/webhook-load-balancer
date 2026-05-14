@@ -146,6 +146,11 @@ UID_CHECKER_API_KEY = (
     or os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
     or "abc123"
 )
+CHECKER_CACHE_ENABLED = _env_bool("CHECKER_CACHE_ENABLED", True)
+CHECKER_CACHE_MAX_ITEMS = max(100, _env_int("CHECKER_CACHE_MAX_ITEMS", 2000))
+CHECKER_GET_UID_CACHE_TTL_SEC = max(60, _env_int("CHECKER_GET_UID_CACHE_TTL_SEC", 6 * 60 * 60))
+CHECKER_CHECK_CACHE_TTL_SEC = max(0, _env_int("CHECKER_CHECK_CACHE_TTL_SEC", 45))
+CHECKER_LATEST_POST_CACHE_TTL_SEC = max(0, _env_int("CHECKER_LATEST_POST_CACHE_TTL_SEC", 55))
 TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
 TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
 TELEGRAM_FAILOVER_STRATEGY = str(os.getenv("TELEGRAM_FAILOVER_STRATEGY", "priority")).strip().lower()
@@ -219,6 +224,14 @@ TELEGRAM_HEAVY_QUEUE_METRICS = {
 }
 TELEGRAM_DEDUP_CACHE: Dict[str, float] = {}
 TELEGRAM_DEDUP_LOCK = threading.Lock()
+CHECKER_CACHE: Dict[str, Dict] = {}
+CHECKER_CACHE_LOCK = threading.Lock()
+CHECKER_CACHE_METRICS = {
+    "hits": 0,
+    "misses": 0,
+    "writes": 0,
+    "evictions": 0,
+}
 
 if UID_CHECKER_SERVICE is not None and UID_CHECKER_API_KEY:
     UID_CHECKER_SERVICE.API_KEY = UID_CHECKER_API_KEY
@@ -1144,6 +1157,102 @@ def _checker_exception_response(exc: Exception) -> Response:
     }), status_code
 
 
+def _checker_cache_metric(name: str, delta: int = 1) -> None:
+    try:
+        CHECKER_CACHE_METRICS[name] = int(CHECKER_CACHE_METRICS.get(name, 0)) + int(delta)
+    except Exception:
+        CHECKER_CACHE_METRICS[name] = delta
+
+
+def _checker_cache_key(namespace: str, source) -> str:
+    try:
+        raw = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        raw = str(source)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"{namespace}:{digest}"
+
+
+def _prune_checker_cache_locked(now: float) -> None:
+    expired = [key for key, item in CHECKER_CACHE.items() if float(item.get("expires_at", 0)) <= now]
+    for key in expired:
+        CHECKER_CACHE.pop(key, None)
+    if expired:
+        _checker_cache_metric("evictions", len(expired))
+
+    overflow = len(CHECKER_CACHE) - CHECKER_CACHE_MAX_ITEMS
+    if overflow <= 0:
+        return
+
+    oldest = sorted(CHECKER_CACHE.items(), key=lambda pair: float(pair[1].get("expires_at", 0)))[:overflow]
+    for key, _item in oldest:
+        CHECKER_CACHE.pop(key, None)
+    _checker_cache_metric("evictions", len(oldest))
+
+
+def _checker_cache_get(cache_key: str) -> Optional[Dict]:
+    if not CHECKER_CACHE_ENABLED or not cache_key:
+        return None
+    now = time.time()
+    with CHECKER_CACHE_LOCK:
+        _prune_checker_cache_locked(now)
+        item = CHECKER_CACHE.get(cache_key)
+        if not item or float(item.get("expires_at", 0)) <= now:
+            CHECKER_CACHE.pop(cache_key, None)
+            _checker_cache_metric("misses", 1)
+            return None
+        _checker_cache_metric("hits", 1)
+        return dict(item)
+
+
+def _checker_cache_set(cache_key: str, response: Response, ttl_seconds: int) -> None:
+    if not CHECKER_CACHE_ENABLED or not cache_key or ttl_seconds <= 0:
+        return
+    status_code = int(response.status_code or 200)
+    if status_code >= 500:
+        return
+    body = response.get_data(as_text=True)
+    if len(body) > 250000:
+        return
+    content_type = str(response.content_type or "application/json")
+    now = time.time()
+    with CHECKER_CACHE_LOCK:
+        _prune_checker_cache_locked(now)
+        CHECKER_CACHE[cache_key] = {
+            "expires_at": now + ttl_seconds,
+            "status": status_code,
+            "body": body,
+            "content_type": content_type,
+            "cached_at": _telegram_queue_now_iso(),
+        }
+        _checker_cache_metric("writes", 1)
+
+
+def _checker_cached_response(item: Dict) -> Response:
+    response = Response(
+        str(item.get("body", "") or ""),
+        status=int(item.get("status", 200) or 200),
+        content_type=str(item.get("content_type", "application/json") or "application/json"),
+    )
+    response.headers["X-Checker-Cache"] = "HIT"
+    return response
+
+
+def _checker_cache_status() -> Dict:
+    with CHECKER_CACHE_LOCK:
+        _prune_checker_cache_locked(time.time())
+        out = dict(CHECKER_CACHE_METRICS)
+        out["items"] = len(CHECKER_CACHE)
+        out["enabled"] = CHECKER_CACHE_ENABLED
+        out["maxItems"] = CHECKER_CACHE_MAX_ITEMS
+        out["ttl"] = {
+            "getUid": CHECKER_GET_UID_CACHE_TTL_SEC,
+            "check": CHECKER_CHECK_CACHE_TTL_SEC,
+            "latestPost": CHECKER_LATEST_POST_CACHE_TTL_SEC,
+        }
+        return out
+
+
 def _call_checker(coro_factory) -> Response:
     if not _checker_ready():
         return _checker_unavailable_response()
@@ -1151,6 +1260,18 @@ def _call_checker(coro_factory) -> Response:
         return _checker_response(_run_checker_async(coro_factory()))
     except Exception as exc:
         return _checker_exception_response(exc)
+
+
+def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_factory) -> Response:
+    cache_key = _checker_cache_key(namespace, key_source) if ttl_seconds > 0 else ""
+    cached = _checker_cache_get(cache_key)
+    if cached:
+        return _checker_cached_response(cached)
+    response = _call_checker(coro_factory)
+    _checker_cache_set(cache_key, response, ttl_seconds)
+    if cache_key:
+        response.headers["X-Checker-Cache"] = "MISS"
+    return response
 
 
 @app.get("/")
@@ -1175,6 +1296,7 @@ def home() -> Response:
                 "ready": _checker_ready(),
                 "importError": UID_CHECKER_IMPORT_ERROR,
                 "apiKeyRequired": bool(UID_CHECKER_API_KEY),
+                "cache": _checker_cache_status(),
             },
             "telegram_heavy_queue": _telegram_queue_metric(),
             "telegram_heavy_commands": sorted(TELEGRAM_HEAVY_COMMANDS),
@@ -1212,19 +1334,27 @@ def checker_health() -> Response:
 
 @app.get("/get-uid")
 def checker_get_uid() -> Response:
-    return _call_checker(lambda: UID_CHECKER_SERVICE.get_uid(
-        url=request.args.get("url", ""),
-        proxy=request.args.get("proxy", ""),
-        x_api_key=_checker_api_key_header() or None,
-    ))
+    url = request.args.get("url", "")
+    proxy = request.args.get("proxy", "")
+    return _call_checker_cached(
+        "get_uid_get",
+        {"url": url, "proxy": proxy},
+        CHECKER_GET_UID_CACHE_TTL_SEC,
+        lambda: UID_CHECKER_SERVICE.get_uid(
+            url=url,
+            proxy=proxy,
+            x_api_key=_checker_api_key_header() or None,
+        ),
+    )
 
 
 @app.post("/get-uid")
 def checker_get_uid_post() -> Response:
+    payload = _checker_payload()
     def run():
-        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        req = UID_CHECKER_SERVICE.CheckRequest(**payload)
         return UID_CHECKER_SERVICE.get_uid_post(req, x_api_key=_checker_api_key_header() or None)
-    return _call_checker(run)
+    return _call_checker_cached("get_uid_post", payload, CHECKER_GET_UID_CACHE_TTL_SEC, run)
 
 
 @app.get("/cookie-health")
@@ -1248,10 +1378,11 @@ def checker_cookie_health_post() -> Response:
 @app.post("/check")
 @app.post("/check/")
 def checker_check() -> Response:
+    payload = _checker_payload()
     def run():
-        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        req = UID_CHECKER_SERVICE.CheckRequest(**payload)
         return UID_CHECKER_SERVICE.check(req, x_api_key=_checker_api_key_header() or None)
-    return _call_checker(run)
+    return _call_checker_cached("check", payload, CHECKER_CHECK_CACHE_TTL_SEC, run)
 
 
 @app.post("/latest-post")
@@ -1259,10 +1390,11 @@ def checker_check() -> Response:
 @app.post("/checkpost")
 @app.post("/checkpost/")
 def checker_latest_post() -> Response:
+    payload = _checker_payload()
     def run():
-        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        req = UID_CHECKER_SERVICE.CheckRequest(**payload)
         return UID_CHECKER_SERVICE.latest_post(req, x_api_key=_checker_api_key_header() or None)
-    return _call_checker(run)
+    return _call_checker_cached("latest_post", payload, CHECKER_LATEST_POST_CACHE_TTL_SEC, run)
 
 
 @app.post("/live-check")
