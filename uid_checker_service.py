@@ -1826,7 +1826,9 @@ async def probe_graph(
             is_default_avatar = "static.xx.fbcdn.net/rsrc.php" in img_url_low
 
             if is_default_avatar:
-                return "DIE", f"graph_default_avatar:{img_url or '-'}"
+                # Default/silhouette avatars are not a hard DIE signal. Many live accounts
+                # have no custom avatar, so only public page signals may close a live/die bet.
+                return "UNKNOWN", f"graph_default_avatar:{img_url or '-'}"
 
             if has_height and is_silhouette is False:
                 return "LIVE", f"graph_not_silhouette:{img_url or '-'}"
@@ -2011,15 +2013,11 @@ async def check_uid_once(
     if die_public:
         status = "DIE"
         reason = f"multi_public_die:{die_public[0].get('reason', '-')}"
-    # Priority 2: graph default avatar.
-    elif graph_state == "DIE" and graph_reason.startswith("graph_default_avatar:"):
-        status = "DIE"
-        reason = graph_reason
-    # Priority 3: checkpoint when there is no reliable live signal.
+    # Priority 2: checkpoint when there is no reliable live signal.
     elif checkpoint_public and not live_public and graph_state != "LIVE":
         status = "CHECKPOINT"
         reason = f"multi_public_checkpoint:{checkpoint_public[0].get('reason', '-')}"
-    # Priority 4: live from public profile extraction.
+    # Priority 3: live from public profile extraction.
     elif live_public:
         status = "LIVE"
         reason = f"multi_public_live:{live_public[0].get('reason', '-')}"
@@ -2029,9 +2027,6 @@ async def check_uid_once(
     elif redirect_state == "DIE" and graph_state == "DIE":
         status = "DIE"
         reason = f"{redirect_reason}|{graph_reason}"
-    elif graph_state == "DIE":
-        status = "DIE"
-        reason = graph_reason
     elif redirect_state == "LIVE":
         # Redirect-only live is too weak, keep as UNKNOWN to avoid false LIVE.
         status = "UNKNOWN"
