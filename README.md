@@ -28,6 +28,15 @@ Copy `.env.example` va dien:
 - `TELEGRAM_HEAVY_QUEUE_MAX_SIZE` (optional, mac dinh `200`): so job toi da trong queue.
 - `TELEGRAM_HEAVY_QUEUE_NON_COMMANDS` (optional, mac dinh `1`): dua text khong phai command vao queue vi bot dung text de check UID/link.
 - `TELEGRAM_HEAVY_COMMANDS` (optional): danh sach command nang cach nhau bang dau phay.
+- `TELEGRAM_DURABLE_QUEUE_ENABLED` (optional, mac dinh `1`): uu tien queue ben vung Redis/Upstash neu da cau hinh credentials.
+- `UPSTASH_REDIS_REST_URL`: REST URL cua Upstash Redis. Khong co bien nay thi LB tu fallback ve queue RAM.
+- `UPSTASH_REDIS_REST_TOKEN`: REST token cua Upstash Redis.
+- `TELEGRAM_DURABLE_QUEUE_KEY` (optional): Redis list key cho job cho xu ly, mac dinh `bot:telegram:heavy:queue`.
+- `TELEGRAM_DURABLE_PROCESSING_KEY` (optional): Redis list key cho job dang xu ly, mac dinh `bot:telegram:heavy:processing`.
+- `TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC` (optional, mac dinh `8`): timeout goi Redis REST.
+- `TELEGRAM_DURABLE_QUEUE_IDLE_SEC` (optional, mac dinh `2`): thoi gian worker cho truoc khi poll lai Redis.
+- `TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP` (optional, mac dinh `1`): khi Render restart, dua job dang nam trong processing ve queue.
+- `TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT` (optional, mac dinh `100`): so job processing toi da recover moi lan worker khoi dong.
 - `TELEGRAM_FAILOVER_STRATEGY` (optional, mac dinh `priority`):
   - `priority`: luon chon URL dau tien trong `TELEGRAM_SCRIPT_URLS`.
   - `hash`: phan tan deterministic theo `update_id`, moi update van chi gui 1 backend.
@@ -77,6 +86,14 @@ Queue nhe cho lenh nang:
 - Dung de dieu tiet `/check`, `/checkpost`, `/viplike`, `/lammoiviplike` va text check UID/link, tranh day qua nhieu request vao Apps Script cung luc.
 - Callback button khong dua vao queue de nut bam van phan hoi nhanh.
 - Neu queue day, LB fallback sang executor cu de khong mat lenh.
+
+Queue ben vung Redis/Upstash cho lenh nang:
+
+- Neu set `UPSTASH_REDIS_REST_URL` va `UPSTASH_REDIS_REST_TOKEN`, LB se day job nang vao Redis list truoc.
+- Worker tren Render claim job tu Redis sang processing list roi moi forward sang Apps Script.
+- Neu Render restart giua chung, job dang o processing co the duoc recover ve queue khi service khoi dong lai.
+- Neu Redis loi hoac chua cau hinh, LB tu fallback ve queue RAM hien co de bot khong dung.
+- Endpoint `/` se hien `telegram_heavy_queue.mode=redis` khi queue ben vung dang active, hoac `memory` neu dang fallback.
 
 Neu muc tieu la giam quota cho app chinh (app chinh giu SePay + task he thong):
 

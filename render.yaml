@@ -48,6 +48,24 @@ services:
         value: "1"
       - key: TELEGRAM_HEAVY_COMMANDS
         value: "/check,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg"
+      - key: TELEGRAM_DURABLE_QUEUE_ENABLED
+        value: "1"
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: TELEGRAM_DURABLE_QUEUE_KEY
+        value: "bot:telegram:heavy:queue"
+      - key: TELEGRAM_DURABLE_PROCESSING_KEY
+        value: "bot:telegram:heavy:processing"
+      - key: TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC
+        value: "8"
+      - key: TELEGRAM_DURABLE_QUEUE_IDLE_SEC
+        value: "2"
+      - key: TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP
+        value: "1"
+      - key: TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT
+        value: "100"
       - key: CORS_ALLOWED_ORIGINS
         sync: false
       - key: CORS_ALLOW_HEADERS

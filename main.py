@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple
@@ -153,7 +153,22 @@ TELEGRAM_HEAVY_COMMANDS = _parse_csv_set(
         "/check,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
     )
 )
-DEBUG_LOG_VERSION = "step26_render_heavy_queue_2026-05-14"
+TELEGRAM_DURABLE_QUEUE_ENABLED = _env_bool("TELEGRAM_DURABLE_QUEUE_ENABLED", True)
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
+TELEGRAM_DURABLE_QUEUE_KEY = (
+    os.getenv("TELEGRAM_DURABLE_QUEUE_KEY", "bot:telegram:heavy:queue").strip()
+    or "bot:telegram:heavy:queue"
+)
+TELEGRAM_DURABLE_PROCESSING_KEY = (
+    os.getenv("TELEGRAM_DURABLE_PROCESSING_KEY", "bot:telegram:heavy:processing").strip()
+    or "bot:telegram:heavy:processing"
+)
+TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC = max(2, _env_int("TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC", 8))
+TELEGRAM_DURABLE_QUEUE_IDLE_SEC = max(1, _env_int("TELEGRAM_DURABLE_QUEUE_IDLE_SEC", 2))
+TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP = _env_bool("TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP", True)
+TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT = max(0, _env_int("TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT", 100))
+DEBUG_LOG_VERSION = "step27_upstash_durable_queue_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -165,14 +180,23 @@ CORS_ALLOW_HEADERS = (
 CORS_MAX_AGE_SEC = max(60, _env_int("CORS_MAX_AGE_SEC", 600))
 TELEGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=TELEGRAM_ASYNC_WORKERS)
 TELEGRAM_HEAVY_QUEUE = Queue(maxsize=TELEGRAM_HEAVY_QUEUE_MAX_SIZE)
+TELEGRAM_HEAVY_QUEUE_WAKE = threading.Event()
 TELEGRAM_HEAVY_QUEUE_STARTED = False
 TELEGRAM_HEAVY_QUEUE_START_LOCK = threading.Lock()
 TELEGRAM_HEAVY_QUEUE_METRICS_LOCK = threading.Lock()
+TELEGRAM_DURABLE_QUEUE_RECOVERED = False
+TELEGRAM_DURABLE_QUEUE_RECOVER_LOCK = threading.Lock()
 TELEGRAM_HEAVY_QUEUE_METRICS = {
     "enqueued": 0,
     "processed": 0,
     "failed": 0,
     "fallback_submitted": 0,
+    "memory_enqueued": 0,
+    "durable_enqueued": 0,
+    "durable_claimed": 0,
+    "durable_completed": 0,
+    "durable_recovered": 0,
+    "durable_errors": 0,
     "active": 0,
     "last_enqueued_at": "",
     "last_processed_at": "",
@@ -594,6 +618,55 @@ def _telegram_queue_now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _durable_queue_configured() -> bool:
+    return bool(
+        TELEGRAM_DURABLE_QUEUE_ENABLED
+        and UPSTASH_REDIS_REST_URL
+        and UPSTASH_REDIS_REST_TOKEN
+    )
+
+
+def _upstash_redis_command(*parts):
+    if not _durable_queue_configured():
+        raise RuntimeError("durable_queue_not_configured")
+    response = requests.post(
+        UPSTASH_REDIS_REST_URL,
+        headers={"Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}"},
+        json=list(parts),
+        timeout=TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC,
+    )
+    body_text = response.text or ""
+    try:
+        data = response.json() if body_text else {}
+    except Exception as exc:
+        raise RuntimeError(f"upstash_invalid_json:http_{response.status_code}:{exc}") from exc
+    if not (200 <= int(response.status_code) < 300):
+        raise RuntimeError(f"upstash_http_{response.status_code}:{body_text[:300]}")
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError(f"upstash_error:{data.get('error')}")
+    return data.get("result") if isinstance(data, dict) else data
+
+
+def _build_telegram_heavy_job(payload: Dict, forward_params: Dict[str, str], dedup_key: str) -> Dict:
+    command = _telegram_command_from_payload(payload) or "__text__"
+    return {
+        "payload": payload,
+        "forward_params": dict(forward_params or {}),
+        "dedup_key": dedup_key,
+        "command": command,
+        "enqueued_at": _telegram_queue_now_iso(),
+    }
+
+
+def _serialize_telegram_heavy_job(job: Dict) -> str:
+    return json.dumps(job, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _durable_queue_error(message: str, code: str, **fields) -> None:
+    _telegram_queue_metric({"durable_errors": 1}, last_error=code)
+    _log_event("warning", "telegram_queue", message, code=code, **fields)
+
+
 def _telegram_queue_metric(delta: Optional[Dict] = None, **set_fields) -> Dict:
     with TELEGRAM_HEAVY_QUEUE_METRICS_LOCK:
         if delta:
@@ -611,12 +684,188 @@ def _telegram_queue_metric(delta: Optional[Dict] = None, **set_fields) -> Dict:
     out["workers"] = TELEGRAM_HEAVY_QUEUE_WORKERS
     out["enabled"] = TELEGRAM_HEAVY_QUEUE_ENABLED
     out["started"] = TELEGRAM_HEAVY_QUEUE_STARTED
+    out["mode"] = "redis" if _durable_queue_configured() else "memory"
+    out["durable_enabled"] = TELEGRAM_DURABLE_QUEUE_ENABLED
+    out["durable_configured"] = _durable_queue_configured()
+    out["durable_queue_key"] = TELEGRAM_DURABLE_QUEUE_KEY
+    out["durable_processing_key"] = TELEGRAM_DURABLE_PROCESSING_KEY
+    out["durable_recover_on_startup"] = TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP
     return out
+
+
+def _enqueue_telegram_heavy_memory_job(job: Dict) -> bool:
+    try:
+        TELEGRAM_HEAVY_QUEUE.put_nowait(job)
+        TELEGRAM_HEAVY_QUEUE_WAKE.set()
+        _telegram_queue_metric(
+            {"enqueued": 1, "memory_enqueued": 1},
+            last_enqueued_at=job.get("enqueued_at", _telegram_queue_now_iso()),
+        )
+        return True
+    except Full:
+        _telegram_queue_metric({"fallback_submitted": 1}, last_error="telegram_heavy_queue_full")
+        _log_event(
+            "warning",
+            "telegram_queue",
+            "Heavy Telegram memory queue full; falling back to executor",
+            code="telegram_heavy_queue_full_fallback",
+            command=job.get("command", ""),
+            dedup_key=job.get("dedup_key", ""),
+            queue_size=TELEGRAM_HEAVY_QUEUE.qsize(),
+            queue_max_size=TELEGRAM_HEAVY_QUEUE_MAX_SIZE,
+        )
+        TELEGRAM_EXECUTOR.submit(
+            _forward_telegram_background,
+            job.get("payload", {}),
+            job.get("forward_params", {}),
+        )
+        return False
+
+
+def _enqueue_telegram_heavy_durable_job(job: Dict) -> bool:
+    try:
+        _upstash_redis_command("LPUSH", TELEGRAM_DURABLE_QUEUE_KEY, _serialize_telegram_heavy_job(job))
+        TELEGRAM_HEAVY_QUEUE_WAKE.set()
+        _telegram_queue_metric(
+            {"enqueued": 1, "durable_enqueued": 1},
+            last_enqueued_at=job.get("enqueued_at", _telegram_queue_now_iso()),
+            last_error="",
+        )
+        return True
+    except Exception as exc:
+        _durable_queue_error(
+            "Durable queue enqueue failed; falling back to memory queue",
+            "telegram_durable_enqueue_failed",
+            command=job.get("command", ""),
+            dedup_key=job.get("dedup_key", ""),
+            error=str(exc),
+        )
+        return False
+
+
+def _claim_telegram_heavy_durable_job() -> Optional[Dict]:
+    try:
+        raw_job = _upstash_redis_command(
+            "RPOPLPUSH",
+            TELEGRAM_DURABLE_QUEUE_KEY,
+            TELEGRAM_DURABLE_PROCESSING_KEY,
+        )
+    except Exception as exc:
+        _durable_queue_error(
+            "Durable queue claim failed",
+            "telegram_durable_claim_failed",
+            error=str(exc),
+        )
+        return None
+
+    if not raw_job:
+        return None
+
+    try:
+        job = json.loads(str(raw_job))
+        if not isinstance(job, dict):
+            raise ValueError("durable_job_not_object")
+        job["_durable_raw"] = str(raw_job)
+        _telegram_queue_metric({"durable_claimed": 1})
+        return job
+    except Exception as exc:
+        _durable_queue_error(
+            "Durable queue job JSON is invalid; removing from processing queue",
+            "telegram_durable_job_invalid",
+            error=str(exc),
+            raw=str(raw_job)[:300],
+        )
+        try:
+            _upstash_redis_command("LREM", TELEGRAM_DURABLE_PROCESSING_KEY, 1, str(raw_job))
+        except Exception as remove_exc:
+            _durable_queue_error(
+                "Failed to remove invalid durable queue job",
+                "telegram_durable_invalid_remove_failed",
+                error=str(remove_exc),
+            )
+        return None
+
+
+def _ack_telegram_heavy_durable_job(job: Dict) -> None:
+    raw_job = str(job.get("_durable_raw", "") or "")
+    if not raw_job:
+        return
+    try:
+        _upstash_redis_command("LREM", TELEGRAM_DURABLE_PROCESSING_KEY, 1, raw_job)
+        _telegram_queue_metric({"durable_completed": 1})
+    except Exception as exc:
+        _durable_queue_error(
+            "Durable queue ack failed",
+            "telegram_durable_ack_failed",
+            command=job.get("command", ""),
+            dedup_key=job.get("dedup_key", ""),
+            error=str(exc),
+        )
+
+
+def _recover_telegram_heavy_durable_processing_once() -> None:
+    global TELEGRAM_DURABLE_QUEUE_RECOVERED
+    if (
+        TELEGRAM_DURABLE_QUEUE_RECOVERED
+        or not TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP
+        or not _durable_queue_configured()
+        or TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT <= 0
+    ):
+        return
+    with TELEGRAM_DURABLE_QUEUE_RECOVER_LOCK:
+        if TELEGRAM_DURABLE_QUEUE_RECOVERED:
+            return
+        recovered = 0
+        for _ in range(TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT):
+            try:
+                moved = _upstash_redis_command(
+                    "RPOPLPUSH",
+                    TELEGRAM_DURABLE_PROCESSING_KEY,
+                    TELEGRAM_DURABLE_QUEUE_KEY,
+                )
+            except Exception as exc:
+                _durable_queue_error(
+                    "Durable queue recovery failed",
+                    "telegram_durable_recovery_failed",
+                    error=str(exc),
+                )
+                break
+            if not moved:
+                break
+            recovered += 1
+        TELEGRAM_DURABLE_QUEUE_RECOVERED = True
+        if recovered:
+            _telegram_queue_metric({"durable_recovered": recovered})
+            _log_event(
+                "warning",
+                "telegram_queue",
+                "Recovered durable queue jobs from processing back to queue",
+                code="telegram_durable_jobs_recovered",
+                recovered=recovered,
+            )
+
+
+def _next_telegram_heavy_queue_job() -> Tuple[str, Dict]:
+    while True:
+        try:
+            return "memory", TELEGRAM_HEAVY_QUEUE.get_nowait()
+        except Empty:
+            pass
+
+        if _durable_queue_configured():
+            durable_job = _claim_telegram_heavy_durable_job()
+            if durable_job:
+                return "durable", durable_job
+            TELEGRAM_HEAVY_QUEUE_WAKE.wait(TELEGRAM_DURABLE_QUEUE_IDLE_SEC)
+            TELEGRAM_HEAVY_QUEUE_WAKE.clear()
+            continue
+
+        return "memory", TELEGRAM_HEAVY_QUEUE.get()
 
 
 def _telegram_heavy_queue_worker(worker_id: int) -> None:
     while True:
-        job = TELEGRAM_HEAVY_QUEUE.get()
+        source, job = _next_telegram_heavy_queue_job()
         _telegram_queue_metric({"active": 1})
         try:
             ok, attempts = _forward_telegram(job.get("payload", {}), job.get("forward_params", {}))
@@ -634,6 +883,7 @@ def _telegram_heavy_queue_worker(worker_id: int) -> None:
                     "Heavy Telegram queued forward failed",
                     code="telegram_heavy_queue_forward_failed",
                     worker_id=worker_id,
+                    queue_source=source,
                     command=job.get("command", ""),
                     dedup_key=job.get("dedup_key", ""),
                     attempts=attempts,
@@ -650,6 +900,7 @@ def _telegram_heavy_queue_worker(worker_id: int) -> None:
                 "Heavy Telegram queue worker crashed on job",
                 code="telegram_heavy_queue_job_exception",
                 worker_id=worker_id,
+                queue_source=source,
                 command=job.get("command", ""),
                 dedup_key=job.get("dedup_key", ""),
                 error=str(exc),
@@ -657,7 +908,10 @@ def _telegram_heavy_queue_worker(worker_id: int) -> None:
             app.logger.exception("Heavy Telegram queue job exception")
         finally:
             _telegram_queue_metric({"active": -1})
-            TELEGRAM_HEAVY_QUEUE.task_done()
+            if source == "durable":
+                _ack_telegram_heavy_durable_job(job)
+            else:
+                TELEGRAM_HEAVY_QUEUE.task_done()
 
 
 def _ensure_telegram_heavy_queue_started() -> None:
@@ -667,6 +921,7 @@ def _ensure_telegram_heavy_queue_started() -> None:
     with TELEGRAM_HEAVY_QUEUE_START_LOCK:
         if TELEGRAM_HEAVY_QUEUE_STARTED:
             return
+        _recover_telegram_heavy_durable_processing_once()
         for i in range(TELEGRAM_HEAVY_QUEUE_WORKERS):
             worker = threading.Thread(
                 target=_telegram_heavy_queue_worker,
@@ -683,38 +938,17 @@ def _ensure_telegram_heavy_queue_started() -> None:
             code="telegram_heavy_queue_started",
             workers=TELEGRAM_HEAVY_QUEUE_WORKERS,
             max_size=TELEGRAM_HEAVY_QUEUE_MAX_SIZE,
+            mode="redis" if _durable_queue_configured() else "memory",
             heavy_commands=sorted(TELEGRAM_HEAVY_COMMANDS),
         )
 
 
 def _enqueue_telegram_heavy_job(payload: Dict, forward_params: Dict[str, str], dedup_key: str) -> bool:
     _ensure_telegram_heavy_queue_started()
-    command = _telegram_command_from_payload(payload) or "__text__"
-    job = {
-        "payload": payload,
-        "forward_params": dict(forward_params or {}),
-        "dedup_key": dedup_key,
-        "command": command,
-        "enqueued_at": _telegram_queue_now_iso(),
-    }
-    try:
-        TELEGRAM_HEAVY_QUEUE.put_nowait(job)
-        _telegram_queue_metric({"enqueued": 1}, last_enqueued_at=job["enqueued_at"])
+    job = _build_telegram_heavy_job(payload, forward_params, dedup_key)
+    if _durable_queue_configured() and _enqueue_telegram_heavy_durable_job(job):
         return True
-    except Full:
-        _telegram_queue_metric({"fallback_submitted": 1}, last_error="telegram_heavy_queue_full")
-        _log_event(
-            "warning",
-            "telegram_queue",
-            "Heavy Telegram queue full; falling back to executor",
-            code="telegram_heavy_queue_full_fallback",
-            command=command,
-            dedup_key=dedup_key,
-            queue_size=TELEGRAM_HEAVY_QUEUE.qsize(),
-            queue_max_size=TELEGRAM_HEAVY_QUEUE_MAX_SIZE,
-        )
-        TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
-        return False
+    return _enqueue_telegram_heavy_memory_job(job)
 
 
 def _response_body_contains_quota_error(body_text: str) -> bool:
@@ -917,7 +1151,11 @@ def webhook_telegram() -> Response:
             "dedup_key": dedup_key,
             "loading": bool(loading.get("ok")),
             "queued": bool(queued),
-            "queue": "heavy" if use_heavy_queue else "executor",
+            "queue": (
+                ("heavy_redis" if _durable_queue_configured() else "heavy_memory")
+                if use_heavy_queue
+                else "executor"
+            ),
         }), 200
 
     ok, attempts = _forward_telegram(payload, forward_params)
