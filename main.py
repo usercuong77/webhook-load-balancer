@@ -151,6 +151,7 @@ CHECKER_CACHE_MAX_ITEMS = max(100, _env_int("CHECKER_CACHE_MAX_ITEMS", 2000))
 CHECKER_GET_UID_CACHE_TTL_SEC = max(60, _env_int("CHECKER_GET_UID_CACHE_TTL_SEC", 6 * 60 * 60))
 CHECKER_CHECK_CACHE_TTL_SEC = max(0, _env_int("CHECKER_CHECK_CACHE_TTL_SEC", 45))
 CHECKER_LATEST_POST_CACHE_TTL_SEC = max(0, _env_int("CHECKER_LATEST_POST_CACHE_TTL_SEC", 55))
+CHECKER_BATCH_MAX_ITEMS = max(1, _env_int("CHECKER_BATCH_MAX_ITEMS", 25))
 TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
 TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
 TELEGRAM_FAILOVER_STRATEGY = str(os.getenv("TELEGRAM_FAILOVER_STRATEGY", "priority")).strip().lower()
@@ -188,7 +189,7 @@ TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC = max(2, _env_int("TELEGRAM_DURABLE_QUEUE_TIM
 TELEGRAM_DURABLE_QUEUE_IDLE_SEC = max(1, _env_int("TELEGRAM_DURABLE_QUEUE_IDLE_SEC", 2))
 TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP = _env_bool("TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP", True)
 TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT = max(0, _env_int("TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT", 100))
-DEBUG_LOG_VERSION = "step27b_integrated_uid_checker_2026-05-14"
+DEBUG_LOG_VERSION = "step31_batch_checker_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -1274,6 +1275,139 @@ def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_fact
     return response
 
 
+def _checker_response_json(response: Response):
+    raw = response.get_data(as_text=True) or ""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {
+            "ok": False,
+            "error": "checker_non_json_response",
+            "body": raw[:500],
+        }
+
+
+def _checker_auth_error_response() -> Optional[Response]:
+    if UID_CHECKER_API_KEY and _checker_api_key_header() != UID_CHECKER_API_KEY:
+        return jsonify({"ok": False, "error": "invalid_api_key"}), 401
+    return None
+
+
+def _normalize_checker_batch_payload(item_raw) -> Tuple[Dict, str, str]:
+    item = item_raw if isinstance(item_raw, dict) else {"input": item_raw}
+    payload = {}
+    for key in ("uid", "url", "proxy", "cookies", "cookiesPool", "cookies_pool"):
+        if key in item and item.get(key) not in (None, ""):
+            payload[key] = item.get(key)
+
+    raw_input = str(
+        item.get("input")
+        or item.get("target")
+        or item.get("value")
+        or item.get("raw")
+        or payload.get("uid")
+        or payload.get("url")
+        or ""
+    ).strip()
+    if raw_input and not payload.get("uid") and not payload.get("url"):
+        if raw_input.isdigit():
+            payload["uid"] = raw_input
+        else:
+            payload["url"] = raw_input
+
+    item_id = str(item.get("id") or item.get("watchId") or item.get("key") or raw_input or "").strip()
+    return payload, item_id, raw_input
+
+
+def _checker_batch_items() -> Tuple[List, Optional[Response]]:
+    body = _checker_payload()
+    items = body.get("items") if isinstance(body, dict) else []
+    if not isinstance(items, list):
+        return [], (jsonify({"ok": False, "error": "invalid_items"}), 400)
+    if len(items) > CHECKER_BATCH_MAX_ITEMS:
+        return [], (
+            jsonify({
+                "ok": False,
+                "error": "too_many_items",
+                "maxItems": CHECKER_BATCH_MAX_ITEMS,
+                "count": len(items),
+            }),
+            413,
+        )
+    return items, None
+
+
+def _run_checker_cached_json(namespace: str, payload: Dict, ttl_seconds: int, coro_factory) -> Dict:
+    response = _call_checker_cached(namespace, payload, ttl_seconds, coro_factory)
+    parsed = _checker_response_json(response)
+    if isinstance(parsed, dict):
+        out = dict(parsed)
+    else:
+        out = {"ok": True, "value": parsed}
+    out["_httpStatus"] = int(response.status_code or 200)
+    out["_cache"] = str(response.headers.get("X-Checker-Cache", ""))
+    return out
+
+
+def _checker_batch_response(kind: str, ttl_seconds: int, runner) -> Response:
+    if not _checker_ready():
+        return _checker_unavailable_response()
+    auth_error = _checker_auth_error_response()
+    if auth_error:
+        return auth_error
+
+    items, error_response = _checker_batch_items()
+    if error_response:
+        return error_response
+
+    started_at = time.time()
+    results = []
+    ok_count = 0
+    fail_count = 0
+    cache_hits = 0
+    for index, item_raw in enumerate(items):
+        payload, item_id, raw_input = _normalize_checker_batch_payload(item_raw)
+        try:
+            result = _run_checker_cached_json(
+                kind,
+                payload,
+                ttl_seconds,
+                lambda payload=payload: runner(payload),
+            )
+            if result.get("_cache") == "HIT":
+                cache_hits += 1
+            if int(result.get("_httpStatus") or 200) < 400 and result.get("ok") is not False:
+                ok_count += 1
+            else:
+                fail_count += 1
+        except Exception as exc:
+            fail_count += 1
+            result = {
+                "ok": False,
+                "error": "checker_batch_item_failed",
+                "detail": str(exc),
+                "_httpStatus": int(getattr(exc, "status_code", 500) or 500),
+                "_cache": "",
+            }
+        result["_index"] = index
+        result["_itemId"] = item_id
+        result["_input"] = raw_input
+        results.append(result)
+
+    return jsonify({
+        "ok": fail_count == 0,
+        "kind": kind,
+        "count": len(results),
+        "okCount": ok_count,
+        "failCount": fail_count,
+        "cacheHits": cache_hits,
+        "elapsedMs": int((time.time() - started_at) * 1000),
+        "results": results,
+    })
+
+
 @app.get("/")
 def home() -> Response:
     return jsonify(
@@ -1296,6 +1430,7 @@ def home() -> Response:
                 "ready": _checker_ready(),
                 "importError": UID_CHECKER_IMPORT_ERROR,
                 "apiKeyRequired": bool(UID_CHECKER_API_KEY),
+                "batchMaxItems": CHECKER_BATCH_MAX_ITEMS,
                 "cache": _checker_cache_status(),
             },
             "telegram_heavy_queue": _telegram_queue_metric(),
@@ -1385,6 +1520,19 @@ def checker_check() -> Response:
     return _call_checker_cached("check", payload, CHECKER_CHECK_CACHE_TTL_SEC, run)
 
 
+@app.post("/batch-check")
+@app.post("/check/batch")
+def checker_batch_check() -> Response:
+    return _checker_batch_response(
+        "check",
+        CHECKER_CHECK_CACHE_TTL_SEC,
+        lambda payload: UID_CHECKER_SERVICE.check(
+            UID_CHECKER_SERVICE.CheckRequest(**payload),
+            x_api_key=UID_CHECKER_API_KEY or None,
+        ),
+    )
+
+
 @app.post("/latest-post")
 @app.post("/latest-post/")
 @app.post("/checkpost")
@@ -1395,6 +1543,20 @@ def checker_latest_post() -> Response:
         req = UID_CHECKER_SERVICE.CheckRequest(**payload)
         return UID_CHECKER_SERVICE.latest_post(req, x_api_key=_checker_api_key_header() or None)
     return _call_checker_cached("latest_post", payload, CHECKER_LATEST_POST_CACHE_TTL_SEC, run)
+
+
+@app.post("/batch-latest-post")
+@app.post("/latest-post/batch")
+@app.post("/checkpost/batch")
+def checker_batch_latest_post() -> Response:
+    return _checker_batch_response(
+        "latest_post",
+        CHECKER_LATEST_POST_CACHE_TTL_SEC,
+        lambda payload: UID_CHECKER_SERVICE.latest_post(
+            UID_CHECKER_SERVICE.CheckRequest(**payload),
+            x_api_key=UID_CHECKER_API_KEY or None,
+        ),
+    )
 
 
 @app.post("/live-check")

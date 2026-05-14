@@ -30,6 +30,8 @@ services:
         value: "45"
       - key: CHECKER_LATEST_POST_CACHE_TTL_SEC
         value: "55"
+      - key: CHECKER_BATCH_MAX_ITEMS
+        value: "25"
       - key: PRIMARY_SCRIPT_URL
         sync: false
       - key: SCRIPT_BACKEND_URLS
