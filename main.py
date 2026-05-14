@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -42,6 +44,9 @@ TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
 TELEGRAM_FAILOVER_STRATEGY = str(os.getenv("TELEGRAM_FAILOVER_STRATEGY", "priority")).strip().lower()
 if TELEGRAM_FAILOVER_STRATEGY not in ("priority", "hash"):
     TELEGRAM_FAILOVER_STRATEGY = "priority"
+TELEGRAM_DEDUP_ENABLED = _env_bool("TELEGRAM_DEDUP_ENABLED", True)
+TELEGRAM_DEDUP_TTL_SEC = max(60, _env_int("TELEGRAM_DEDUP_TTL_SEC", 6 * 60 * 60))
+TELEGRAM_DEDUP_MAX_ITEMS = max(100, _env_int("TELEGRAM_DEDUP_MAX_ITEMS", 5000))
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -52,6 +57,8 @@ CORS_ALLOW_HEADERS = (
 )
 CORS_MAX_AGE_SEC = max(60, _env_int("CORS_MAX_AGE_SEC", 600))
 TELEGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=TELEGRAM_ASYNC_WORKERS)
+TELEGRAM_DEDUP_CACHE: Dict[str, float] = {}
+TELEGRAM_DEDUP_LOCK = threading.Lock()
 
 
 def _payload_dict() -> Dict:
@@ -78,6 +85,71 @@ def _is_telegram_payload(payload: Dict) -> bool:
         or "callback_query" in payload
         or "edited_message" in payload
     )
+
+
+def _telegram_message_identity(payload: Dict) -> Tuple[str, str]:
+    for field in ("message", "edited_message", "channel_post", "edited_channel_post"):
+        message = payload.get(field)
+        if not isinstance(message, dict):
+            continue
+        message_id = str(message.get("message_id", "")).strip()
+        chat = message.get("chat") if isinstance(message.get("chat"), dict) else {}
+        chat_id = str(chat.get("id", "")).strip()
+        if chat_id and message_id:
+            return field, f"{chat_id}:{message_id}"
+    return "", ""
+
+
+def _telegram_dedup_key(payload: Dict) -> str:
+    update_id = str(payload.get("update_id", "")).strip()
+    if update_id:
+        return f"upd:{update_id}"
+
+    callback_query = payload.get("callback_query")
+    if isinstance(callback_query, dict):
+        callback_id = str(callback_query.get("id", "")).strip()
+        if callback_id:
+            return f"cb:{callback_id}"
+
+    message_type, message_key = _telegram_message_identity(payload)
+    if message_key:
+        return f"{message_type}:{message_key}"
+
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        raw = str(payload)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"hash:{digest}"
+
+
+def _prune_telegram_dedup_cache(now: float) -> None:
+    expired = [key for key, expires_at in TELEGRAM_DEDUP_CACHE.items() if expires_at <= now]
+    for key in expired:
+        TELEGRAM_DEDUP_CACHE.pop(key, None)
+
+    overflow = len(TELEGRAM_DEDUP_CACHE) - TELEGRAM_DEDUP_MAX_ITEMS
+    if overflow <= 0:
+        return
+
+    oldest = sorted(TELEGRAM_DEDUP_CACHE.items(), key=lambda item: item[1])[:overflow]
+    for key, _expires_at in oldest:
+        TELEGRAM_DEDUP_CACHE.pop(key, None)
+
+
+def _mark_telegram_update_seen(payload: Dict) -> Tuple[bool, str]:
+    if not TELEGRAM_DEDUP_ENABLED:
+        return False, ""
+
+    key = _telegram_dedup_key(payload)
+    now = time.time()
+    with TELEGRAM_DEDUP_LOCK:
+        _prune_telegram_dedup_cache(now)
+        expires_at = TELEGRAM_DEDUP_CACHE.get(key, 0)
+        if expires_at > now:
+            return True, key
+        TELEGRAM_DEDUP_CACHE[key] = now + TELEGRAM_DEDUP_TTL_SEC
+        return False, key
 
 
 def _is_sepay_payload(payload: Dict) -> bool:
@@ -364,6 +436,9 @@ def home() -> Response:
             "telegram_failover_strategy": TELEGRAM_FAILOVER_STRATEGY,
             "telegram_delivery_mode": "single_backend_no_retry",
             "telegram_retry_on_json_ok_false": False,
+            "telegram_dedup_enabled": TELEGRAM_DEDUP_ENABLED,
+            "telegram_dedup_ttl_sec": TELEGRAM_DEDUP_TTL_SEC,
+            "telegram_dedup_cache_items": len(TELEGRAM_DEDUP_CACHE),
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
@@ -394,15 +469,31 @@ def webhook_options() -> Response:
 @app.post("/webhook/telegram")
 def webhook_telegram() -> Response:
     payload = _payload_dict()
+    duplicate, dedup_key = _mark_telegram_update_seen(payload)
+    if duplicate:
+        return jsonify({
+            "ok": True,
+            "accepted": False,
+            "duplicate": True,
+            "dedup_key": dedup_key,
+            "source": "telegram",
+        }), 200
+
     forward_params = _telegram_forward_params_from_request()
     if TELEGRAM_ASYNC_ENABLED:
         # Ack Telegram immediately to avoid webhook timeouts on cold start or slow Apps Script runs.
         TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
-        return jsonify({"ok": True, "accepted": True, "async": True, "source": "telegram"}), 200
+        return jsonify({
+            "ok": True,
+            "accepted": True,
+            "async": True,
+            "source": "telegram",
+            "dedup_key": dedup_key,
+        }), 200
 
     ok, attempts = _forward_telegram(payload, forward_params)
     # Telegram route always returns 200 to avoid aggressive retry storms.
-    return jsonify({"ok": ok, "source": "telegram", "attempts": attempts}), 200
+    return jsonify({"ok": ok, "source": "telegram", "dedup_key": dedup_key, "attempts": attempts}), 200
 
 
 @app.post("/webhook/sepay")
