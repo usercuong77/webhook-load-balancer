@@ -102,6 +102,7 @@ if TELEGRAM_FAILOVER_STRATEGY not in ("priority", "hash"):
 TELEGRAM_DEDUP_ENABLED = _env_bool("TELEGRAM_DEDUP_ENABLED", True)
 TELEGRAM_DEDUP_TTL_SEC = max(60, _env_int("TELEGRAM_DEDUP_TTL_SEC", 6 * 60 * 60))
 TELEGRAM_DEDUP_MAX_ITEMS = max(100, _env_int("TELEGRAM_DEDUP_MAX_ITEMS", 5000))
+DEBUG_LOG_VERSION = "step20_debug_logging_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -526,6 +527,7 @@ def home() -> Response:
         {
             "ok": True,
             "service": "apps-script-webhook-load-balancer",
+            "debug_log_version": DEBUG_LOG_VERSION,
             "telegram_backends": len(_telegram_backends()),
             "telegram_async": TELEGRAM_ASYNC_ENABLED,
             "telegram_failover_strategy": TELEGRAM_FAILOVER_STRATEGY,
