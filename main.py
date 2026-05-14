@@ -138,7 +138,7 @@ TELEGRAM_LOADING_ENABLED = _env_bool("TELEGRAM_LOADING_ENABLED", True)
 TELEGRAM_LOADING_TEXT = os.getenv("TELEGRAM_LOADING_TEXT", "Đang chạy...").strip() or "Đang chạy..."
 TELEGRAM_LOADING_TIMEOUT_SEC = max(1, _env_int("TELEGRAM_LOADING_TIMEOUT_SEC", 4))
 TELEGRAM_BOT_TOKENS = _load_telegram_bot_token_map()
-DEBUG_LOG_VERSION = "step20_debug_logging_2026-05-14"
+DEBUG_LOG_VERSION = "step25_render_immediate_loading_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
