@@ -395,8 +395,8 @@ def _telegram_bot_hint_from_request() -> str:
 
 def _telegram_bot_token_for_hint(hint: str) -> str:
     key = str(hint or "").strip().lower()
-    if key and key in TELEGRAM_BOT_TOKENS:
-        return TELEGRAM_BOT_TOKENS[key]
+    if key:
+        return TELEGRAM_BOT_TOKENS.get(key, "")
     return TELEGRAM_BOT_TOKENS.get("main", "") or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 
