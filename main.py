@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import asyncio
 import hashlib
 import json
 import os
@@ -9,6 +10,14 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from flask import Flask, Response, jsonify, request
+
+try:
+    import uid_checker_service as UID_CHECKER_SERVICE
+except Exception as uid_checker_import_exc:
+    UID_CHECKER_SERVICE = None
+    UID_CHECKER_IMPORT_ERROR = str(uid_checker_import_exc)
+else:
+    UID_CHECKER_IMPORT_ERROR = ""
 
 app = Flask(__name__)
 
@@ -131,6 +140,11 @@ SEPAY_SCRIPT_URLS = _parse_urls(os.getenv("SEPAY_SCRIPT_URLS", ""))
 SEPAY_FAILOVER_ENABLED = _env_bool("SEPAY_FAILOVER_ENABLED", False)
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
+UID_CHECKER_ENABLED = _env_bool("UID_CHECKER_ENABLED", True)
+UID_CHECKER_API_KEY = (
+    os.getenv("UID_CHECKER_API_KEY", "").strip()
+    or os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
+)
 TELEGRAM_ASYNC_ENABLED = _env_bool("TELEGRAM_ASYNC_ENABLED", True)
 TELEGRAM_ASYNC_WORKERS = max(2, _env_int("TELEGRAM_ASYNC_WORKERS", 8))
 TELEGRAM_FAILOVER_STRATEGY = str(os.getenv("TELEGRAM_FAILOVER_STRATEGY", "priority")).strip().lower()
@@ -168,7 +182,7 @@ TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC = max(2, _env_int("TELEGRAM_DURABLE_QUEUE_TIM
 TELEGRAM_DURABLE_QUEUE_IDLE_SEC = max(1, _env_int("TELEGRAM_DURABLE_QUEUE_IDLE_SEC", 2))
 TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP = _env_bool("TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP", True)
 TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT = max(0, _env_int("TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT", 100))
-DEBUG_LOG_VERSION = "step27_upstash_durable_queue_2026-05-14"
+DEBUG_LOG_VERSION = "step27b_integrated_uid_checker_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -204,6 +218,9 @@ TELEGRAM_HEAVY_QUEUE_METRICS = {
 }
 TELEGRAM_DEDUP_CACHE: Dict[str, float] = {}
 TELEGRAM_DEDUP_LOCK = threading.Lock()
+
+if UID_CHECKER_SERVICE is not None and UID_CHECKER_API_KEY:
+    UID_CHECKER_SERVICE.API_KEY = UID_CHECKER_API_KEY
 
 
 def _payload_dict() -> Dict:
@@ -1059,6 +1076,82 @@ def _forward_single(source: str, payload: Dict) -> Tuple[bool, Dict]:
         return False, {"error": str(exc)}
 
 
+def _checker_ready() -> bool:
+    return bool(UID_CHECKER_ENABLED and UID_CHECKER_SERVICE is not None)
+
+
+def _checker_api_key_header() -> str:
+    return str(request.headers.get("X-Api-Key", "") or request.headers.get("x-api-key", "")).strip()
+
+
+def _checker_payload() -> Dict:
+    payload = _payload_dict()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _run_checker_async(coro):
+    try:
+        return asyncio.run(coro)
+    except RuntimeError as exc:
+        if "asyncio.run() cannot be called from a running event loop" not in str(exc):
+            raise
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _checker_unavailable_response() -> Response:
+    status = 503 if UID_CHECKER_ENABLED else 404
+    return jsonify({
+        "ok": False,
+        "error": "uid_checker_unavailable",
+        "enabled": UID_CHECKER_ENABLED,
+        "imported": UID_CHECKER_SERVICE is not None,
+        "importError": UID_CHECKER_IMPORT_ERROR,
+    }), status
+
+
+def _checker_response(result) -> Response:
+    body = getattr(result, "body", None)
+    if body is not None:
+        status_code = int(getattr(result, "status_code", 200) or 200)
+        media_type = str(getattr(result, "media_type", "") or "application/json")
+        return Response(body, status=status_code, content_type=media_type)
+    if isinstance(result, (dict, list)):
+        return jsonify(result)
+    return jsonify({"ok": True, "result": result})
+
+
+def _checker_exception_response(exc: Exception) -> Response:
+    status_code = int(getattr(exc, "status_code", 500) or 500)
+    detail = getattr(exc, "detail", str(exc))
+    if status_code >= 500:
+        _log_event(
+            "error",
+            "uid_checker",
+            "Integrated UID checker failed",
+            code="integrated_uid_checker_exception",
+            path=request.path,
+            error=str(exc),
+        )
+    return jsonify({
+        "ok": False,
+        "error": "uid_checker_error" if status_code >= 500 else "uid_checker_rejected",
+        "detail": detail,
+    }), status_code
+
+
+def _call_checker(coro_factory) -> Response:
+    if not _checker_ready():
+        return _checker_unavailable_response()
+    try:
+        return _checker_response(_run_checker_async(coro_factory()))
+    except Exception as exc:
+        return _checker_exception_response(exc)
+
+
 @app.get("/")
 def home() -> Response:
     return jsonify(
@@ -1076,6 +1169,12 @@ def home() -> Response:
             "telegram_dedup_cache_items": len(TELEGRAM_DEDUP_CACHE),
             "telegram_loading_enabled": TELEGRAM_LOADING_ENABLED,
             "telegram_loading_tokens": sorted(TELEGRAM_BOT_TOKENS.keys()),
+            "integrated_uid_checker": {
+                "enabled": UID_CHECKER_ENABLED,
+                "ready": _checker_ready(),
+                "importError": UID_CHECKER_IMPORT_ERROR,
+                "apiKeyRequired": bool(UID_CHECKER_API_KEY),
+            },
             "telegram_heavy_queue": _telegram_queue_metric(),
             "telegram_heavy_commands": sorted(TELEGRAM_HEAVY_COMMANDS),
             "telegram_heavy_queue_non_commands": TELEGRAM_HEAVY_QUEUE_NON_COMMANDS,
@@ -1085,6 +1184,97 @@ def home() -> Response:
     )
 
 
+@app.get("/health")
+def health() -> Response:
+    checker_health = {}
+    if _checker_ready():
+        try:
+            checker_health = _run_checker_async(UID_CHECKER_SERVICE.health())
+        except Exception as exc:
+            checker_health = {"ok": False, "error": str(exc)}
+    return jsonify({
+        "ok": True,
+        "service": "apps-script-webhook-load-balancer",
+        "debug_log_version": DEBUG_LOG_VERSION,
+        "integratedUidChecker": {
+            "enabled": UID_CHECKER_ENABLED,
+            "ready": _checker_ready(),
+            "health": checker_health,
+        },
+    })
+
+
+@app.get("/checker/health")
+def checker_health() -> Response:
+    return _call_checker(lambda: UID_CHECKER_SERVICE.health())
+
+
+@app.get("/get-uid")
+def checker_get_uid() -> Response:
+    return _call_checker(lambda: UID_CHECKER_SERVICE.get_uid(
+        url=request.args.get("url", ""),
+        proxy=request.args.get("proxy", ""),
+        x_api_key=_checker_api_key_header() or None,
+    ))
+
+
+@app.post("/get-uid")
+def checker_get_uid_post() -> Response:
+    def run():
+        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        return UID_CHECKER_SERVICE.get_uid_post(req, x_api_key=_checker_api_key_header() or None)
+    return _call_checker(run)
+
+
+@app.get("/cookie-health")
+@app.get("/cookie-health/")
+def checker_cookie_health() -> Response:
+    return _call_checker(lambda: UID_CHECKER_SERVICE.cookie_health(
+        proxy=request.args.get("proxy", ""),
+        x_api_key=_checker_api_key_header() or None,
+    ))
+
+
+@app.post("/cookie-health")
+@app.post("/cookie-health/")
+def checker_cookie_health_post() -> Response:
+    def run():
+        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        return UID_CHECKER_SERVICE.cookie_health_post(req, x_api_key=_checker_api_key_header() or None)
+    return _call_checker(run)
+
+
+@app.post("/check")
+@app.post("/check/")
+def checker_check() -> Response:
+    def run():
+        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        return UID_CHECKER_SERVICE.check(req, x_api_key=_checker_api_key_header() or None)
+    return _call_checker(run)
+
+
+@app.post("/latest-post")
+@app.post("/latest-post/")
+@app.post("/checkpost")
+@app.post("/checkpost/")
+def checker_latest_post() -> Response:
+    def run():
+        req = UID_CHECKER_SERVICE.CheckRequest(**_checker_payload())
+        return UID_CHECKER_SERVICE.latest_post(req, x_api_key=_checker_api_key_header() or None)
+    return _call_checker(run)
+
+
+@app.post("/live-check")
+@app.post("/live-check/")
+@app.post("/livecheck")
+@app.post("/check-live")
+def checker_live_check() -> Response:
+    def run():
+        req = UID_CHECKER_SERVICE.LiveCheckRequest(**_checker_payload())
+        return UID_CHECKER_SERVICE.live_check(req, x_api_key=_checker_api_key_header() or None)
+    return _call_checker(run)
+
+
 @app.after_request
 def add_cors_headers(response: Response) -> Response:
     allow_origin = _resolve_cors_allow_origin()
@@ -1092,7 +1282,7 @@ def add_cors_headers(response: Response) -> Response:
         response.headers["Access-Control-Allow-Origin"] = allow_origin
         if allow_origin != "*":
             response.headers["Vary"] = "Origin"
-    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = CORS_ALLOW_HEADERS
     response.headers["Access-Control-Max-Age"] = str(CORS_MAX_AGE_SEC)
     return response

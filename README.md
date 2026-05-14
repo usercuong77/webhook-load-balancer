@@ -16,6 +16,10 @@ Copy `.env.example` va dien:
 - `LEAD_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook lead.
 - `SEPAY_SCRIPT_URLS` (optional): danh sach URL rieng cho webhook SePay.
 - `SEPAY_FAILOVER_ENABLED` (optional, mac dinh `0`): bat failover SePay (can than duplicate neu du lieu dedupe khong chia se).
+- `UID_CHECKER_ENABLED` (optional, mac dinh `1`): bat endpoint checker tich hop trong LB.
+- `UID_CHECKER_API_KEY` (optional): API key bao ve `/check`, `/get-uid`, `/latest-post`, `/cookie-health`. Nen dat cung gia tri voi `EXTERNAL_CHECKER_API_KEY` trong Apps Script.
+- `UID_CHECKER_TIMEOUT` (optional, mac dinh `10`): timeout goi Facebook public probe.
+- `LATEST_POST_TOTAL_TIMEOUT` (optional, mac dinh `15`): timeout tong cho `/latest-post` va `/checkpost`.
 - `WEBHOOK_SHARED_SECRET`: secret gui header `X-Webhook-Secret` ve Apps Script.
 - `TELEGRAM_ASYNC_ENABLED` (optional, mac dinh `1`): tra `200` ngay cho Telegram, forward webhook o background de tranh timeout.
 - `TELEGRAM_ASYNC_WORKERS` (optional, mac dinh `8`): so worker async cho Telegram.
@@ -115,6 +119,25 @@ Webhook lead:
 
 Route nay da ho tro CORS + OPTIONS de browser form submit truc tiep bang `fetch`.
 LB da ho tro failover lead backend (neu cau hinh nhieu URL).
+
+### UID checker tich hop
+
+Service nay da tich hop cac endpoint chinh cua `uid-checker-service`, de co the giam 1 Render free service:
+
+- `POST /check`
+- `GET /get-uid`
+- `POST /get-uid`
+- `POST /latest-post`
+- `POST /checkpost`
+- `GET /cookie-health`
+- `POST /cookie-health`
+- `GET /checker/health`
+
+Sau khi deploy, Apps Script co the tro checker sang:
+
+`https://<your-render-domain>/check`
+
+Luu y: giu `uid-checker-service` cu trong vai tro rollback cho den khi test `/check`, `/checkpost`, `/viplike` on dinh.
 
 ## 4) Tuong thich voi Apps Script hien tai
 
