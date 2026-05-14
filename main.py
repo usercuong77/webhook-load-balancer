@@ -12,6 +12,61 @@ from flask import Flask, Response, jsonify, request
 app = Flask(__name__)
 
 
+def _sanitize_log_value(value, depth: int = 0):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        text = " ".join(value.split())
+        text = text.replace(WEBHOOK_SHARED_SECRET, "***") if WEBHOOK_SHARED_SECRET else text
+        if "secret=" in text:
+            parts = text.split("secret=")
+            text = parts[0] + "secret=***"
+            if "&" in parts[-1]:
+                text += "&" + parts[-1].split("&", 1)[1]
+        return text[:600]
+    if depth >= 2:
+        try:
+            return json.dumps(value, ensure_ascii=False)[:600]
+        except Exception:
+            return "[unserializable]"
+    if isinstance(value, list):
+        out = [_sanitize_log_value(item, depth + 1) for item in value[:8]]
+        if len(value) > 8:
+            out.append(f"... +{len(value) - 8}")
+        return out
+    if isinstance(value, dict):
+        out = {}
+        for key, item in list(value.items())[:24]:
+            key_text = str(key)
+            if any(part in key_text.lower() for part in ("token", "secret", "password", "api_key", "apikey")):
+                out[key_text] = "***" if item else ""
+            else:
+                out[key_text] = _sanitize_log_value(item, depth + 1)
+        if len(value) > 24:
+            out["_truncated_keys"] = len(value) - 24
+        return out
+    return str(value)[:600]
+
+
+def _log_event(level: str, category: str, message: str, **fields) -> None:
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": "render",
+        "category": category,
+        "severity": level,
+        "message": message,
+    }
+    for key, value in fields.items():
+        entry[key] = _sanitize_log_value(value)
+    line = "[bot-debug] " + json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    if level == "error":
+        app.logger.error(line)
+    elif level == "warning":
+        app.logger.warning(line)
+    else:
+        app.logger.info(line)
+
+
 def _parse_urls(raw: str) -> List[str]:
     if not raw:
         return []
@@ -299,6 +354,7 @@ def _telegram_forward_params_from_request() -> Dict[str, str]:
 def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
     urls = _ordered_urls(_telegram_backends(), payload, "telegram")
     if not urls:
+        _log_event("error", "telegram_retry", "No Telegram backend URL configured", code="telegram_backend_missing")
         return False, [{"error": "No backend URL configured"}]
 
     # Telegram commands are not safe to retry across Apps Script backends:
@@ -319,6 +375,14 @@ def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = 
             }],
         )
     except Exception as exc:
+        _log_event(
+            "error",
+            "telegram_retry",
+            "Telegram forward request failed",
+            code="telegram_forward_exception",
+            url=_append_query_params(target_url, params),
+            error=str(exc),
+        )
         return False, [{
             "url": _append_query_params(target_url, params),
             "error": str(exc),
@@ -330,8 +394,21 @@ def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) 
     try:
         ok, attempts = _forward_telegram(payload, forward_params)
         if not ok:
-            app.logger.error("Telegram async forward failed: %s", json.dumps(attempts, ensure_ascii=False))
-    except Exception:
+            _log_event(
+                "error",
+                "telegram_retry",
+                "Telegram async forward failed",
+                code="telegram_async_forward_failed",
+                attempts=attempts,
+            )
+    except Exception as exc:
+        _log_event(
+            "error",
+            "telegram_retry",
+            "Telegram async forward crashed",
+            code="telegram_async_forward_crashed",
+            error=str(exc),
+        )
         app.logger.exception("Telegram async forward crashed")
 
 
@@ -385,6 +462,7 @@ def _forward_with_failover(
     require_json_ok_true: bool = False,
 ) -> Tuple[bool, List[Dict]]:
     if not urls:
+        _log_event("error", "render_forward_error", "No backend URL configured", code="backend_missing", route=source)
         return False, [{"error": "No backend URL configured"}]
 
     attempts = []
@@ -406,7 +484,24 @@ def _forward_with_failover(
             ):
                 return 200 <= int(resp.status_code) < 300, attempts
         except Exception as exc:
+            _log_event(
+                "error",
+                "render_forward_error",
+                "Backend forward request failed",
+                code="backend_forward_exception",
+                route=source,
+                url=_append_query_params(url, extra_params or {}),
+                error=str(exc),
+            )
             attempts.append({"url": _append_query_params(url, extra_params or {}), "error": str(exc)})
+    _log_event(
+        "error",
+        "render_forward_error",
+        "All backend forward attempts failed",
+        code="backend_forward_all_failed",
+        route=source,
+        attempts=attempts,
+    )
     return False, attempts
 
 
@@ -471,6 +566,15 @@ def webhook_telegram() -> Response:
     payload = _payload_dict()
     duplicate, dedup_key = _mark_telegram_update_seen(payload)
     if duplicate:
+        _log_event(
+            "info",
+            "telegram_retry",
+            "Duplicate Telegram update skipped by Render",
+            code="duplicate_update_skipped",
+            route="telegram",
+            dedup_key=dedup_key,
+            update_id=payload.get("update_id") if isinstance(payload, dict) else "",
+        )
         return jsonify({
             "ok": True,
             "accepted": False,
