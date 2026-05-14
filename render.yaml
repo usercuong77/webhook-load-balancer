@@ -38,6 +38,16 @@ services:
         sync: false
       - key: TELEGRAM_BOT_TOKEN_MAP
         sync: false
+      - key: TELEGRAM_HEAVY_QUEUE_ENABLED
+        value: "1"
+      - key: TELEGRAM_HEAVY_QUEUE_WORKERS
+        value: "2"
+      - key: TELEGRAM_HEAVY_QUEUE_MAX_SIZE
+        value: "200"
+      - key: TELEGRAM_HEAVY_QUEUE_NON_COMMANDS
+        value: "1"
+      - key: TELEGRAM_HEAVY_COMMANDS
+        value: "/check,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg"
       - key: CORS_ALLOWED_ORIGINS
         sync: false
       - key: CORS_ALLOW_HEADERS

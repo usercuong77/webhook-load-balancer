@@ -2,9 +2,10 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+from queue import Full, Queue
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from flask import Flask, Response, jsonify, request
@@ -74,6 +75,10 @@ def _parse_urls(raw: str) -> List[str]:
     return [item for item in parts if item]
 
 
+def _parse_csv_set(raw: str) -> Set[str]:
+    return {item.strip().lower() for item in (raw or "").split(",") if item.strip()}
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, str(default)))
@@ -138,7 +143,17 @@ TELEGRAM_LOADING_ENABLED = _env_bool("TELEGRAM_LOADING_ENABLED", True)
 TELEGRAM_LOADING_TEXT = os.getenv("TELEGRAM_LOADING_TEXT", "Đang chạy...").strip() or "Đang chạy..."
 TELEGRAM_LOADING_TIMEOUT_SEC = max(1, _env_int("TELEGRAM_LOADING_TIMEOUT_SEC", 4))
 TELEGRAM_BOT_TOKENS = _load_telegram_bot_token_map()
-DEBUG_LOG_VERSION = "step25_render_immediate_loading_2026-05-14"
+TELEGRAM_HEAVY_QUEUE_ENABLED = _env_bool("TELEGRAM_HEAVY_QUEUE_ENABLED", True)
+TELEGRAM_HEAVY_QUEUE_WORKERS = max(1, _env_int("TELEGRAM_HEAVY_QUEUE_WORKERS", 2))
+TELEGRAM_HEAVY_QUEUE_MAX_SIZE = max(10, _env_int("TELEGRAM_HEAVY_QUEUE_MAX_SIZE", 200))
+TELEGRAM_HEAVY_QUEUE_NON_COMMANDS = _env_bool("TELEGRAM_HEAVY_QUEUE_NON_COMMANDS", True)
+TELEGRAM_HEAVY_COMMANDS = _parse_csv_set(
+    os.getenv(
+        "TELEGRAM_HEAVY_COMMANDS",
+        "/check,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
+    )
+)
+DEBUG_LOG_VERSION = "step26_render_heavy_queue_2026-05-14"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -149,6 +164,20 @@ CORS_ALLOW_HEADERS = (
 )
 CORS_MAX_AGE_SEC = max(60, _env_int("CORS_MAX_AGE_SEC", 600))
 TELEGRAM_EXECUTOR = ThreadPoolExecutor(max_workers=TELEGRAM_ASYNC_WORKERS)
+TELEGRAM_HEAVY_QUEUE = Queue(maxsize=TELEGRAM_HEAVY_QUEUE_MAX_SIZE)
+TELEGRAM_HEAVY_QUEUE_STARTED = False
+TELEGRAM_HEAVY_QUEUE_START_LOCK = threading.Lock()
+TELEGRAM_HEAVY_QUEUE_METRICS_LOCK = threading.Lock()
+TELEGRAM_HEAVY_QUEUE_METRICS = {
+    "enqueued": 0,
+    "processed": 0,
+    "failed": 0,
+    "fallback_submitted": 0,
+    "active": 0,
+    "last_enqueued_at": "",
+    "last_processed_at": "",
+    "last_error": "",
+}
 TELEGRAM_DEDUP_CACHE: Dict[str, float] = {}
 TELEGRAM_DEDUP_LOCK = threading.Lock()
 
@@ -412,6 +441,35 @@ def _telegram_text_message_target(payload: Dict) -> Tuple[str, str]:
     return chat_id, text
 
 
+def _telegram_text_from_payload(payload: Dict) -> str:
+    message = payload.get("message") if isinstance(payload, dict) else None
+    if not isinstance(message, dict):
+        return ""
+    return str(message.get("text", "") or "").strip()
+
+
+def _telegram_command_from_payload(payload: Dict) -> str:
+    text = _telegram_text_from_payload(payload)
+    if not text.startswith("/"):
+        return ""
+    first = text.split(None, 1)[0].split("@", 1)[0]
+    return first.strip().lower()
+
+
+def _is_heavy_telegram_update(payload: Dict) -> bool:
+    if not TELEGRAM_HEAVY_QUEUE_ENABLED:
+        return False
+    if isinstance(payload, dict) and isinstance(payload.get("callback_query"), dict):
+        return False
+    text = _telegram_text_from_payload(payload)
+    if not text:
+        return False
+    command = _telegram_command_from_payload(payload)
+    if command:
+        return command in TELEGRAM_HEAVY_COMMANDS
+    return TELEGRAM_HEAVY_QUEUE_NON_COMMANDS
+
+
 def _send_telegram_loading_message(payload: Dict, bot_hint: str) -> Dict:
     if not TELEGRAM_LOADING_ENABLED:
         return {"ok": False, "skipped": True, "reason": "loading_disabled"}
@@ -530,6 +588,133 @@ def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) 
             error=str(exc),
         )
         app.logger.exception("Telegram async forward crashed")
+
+
+def _telegram_queue_now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _telegram_queue_metric(delta: Optional[Dict] = None, **set_fields) -> Dict:
+    with TELEGRAM_HEAVY_QUEUE_METRICS_LOCK:
+        if delta:
+            for key, value in delta.items():
+                current = TELEGRAM_HEAVY_QUEUE_METRICS.get(key, 0)
+                try:
+                    TELEGRAM_HEAVY_QUEUE_METRICS[key] = int(current) + int(value)
+                except Exception:
+                    TELEGRAM_HEAVY_QUEUE_METRICS[key] = value
+        for key, value in set_fields.items():
+            TELEGRAM_HEAVY_QUEUE_METRICS[key] = value
+        out = dict(TELEGRAM_HEAVY_QUEUE_METRICS)
+    out["queue_size"] = TELEGRAM_HEAVY_QUEUE.qsize()
+    out["queue_max_size"] = TELEGRAM_HEAVY_QUEUE_MAX_SIZE
+    out["workers"] = TELEGRAM_HEAVY_QUEUE_WORKERS
+    out["enabled"] = TELEGRAM_HEAVY_QUEUE_ENABLED
+    out["started"] = TELEGRAM_HEAVY_QUEUE_STARTED
+    return out
+
+
+def _telegram_heavy_queue_worker(worker_id: int) -> None:
+    while True:
+        job = TELEGRAM_HEAVY_QUEUE.get()
+        _telegram_queue_metric({"active": 1})
+        try:
+            ok, attempts = _forward_telegram(job.get("payload", {}), job.get("forward_params", {}))
+            if ok:
+                _telegram_queue_metric({"processed": 1}, last_processed_at=_telegram_queue_now_iso(), last_error="")
+            else:
+                _telegram_queue_metric(
+                    {"processed": 1, "failed": 1},
+                    last_processed_at=_telegram_queue_now_iso(),
+                    last_error="telegram_heavy_queue_forward_failed",
+                )
+                _log_event(
+                    "error",
+                    "telegram_queue",
+                    "Heavy Telegram queued forward failed",
+                    code="telegram_heavy_queue_forward_failed",
+                    worker_id=worker_id,
+                    command=job.get("command", ""),
+                    dedup_key=job.get("dedup_key", ""),
+                    attempts=attempts,
+                )
+        except Exception as exc:
+            _telegram_queue_metric(
+                {"processed": 1, "failed": 1},
+                last_processed_at=_telegram_queue_now_iso(),
+                last_error=str(exc),
+            )
+            _log_event(
+                "error",
+                "telegram_queue",
+                "Heavy Telegram queue worker crashed on job",
+                code="telegram_heavy_queue_job_exception",
+                worker_id=worker_id,
+                command=job.get("command", ""),
+                dedup_key=job.get("dedup_key", ""),
+                error=str(exc),
+            )
+            app.logger.exception("Heavy Telegram queue job exception")
+        finally:
+            _telegram_queue_metric({"active": -1})
+            TELEGRAM_HEAVY_QUEUE.task_done()
+
+
+def _ensure_telegram_heavy_queue_started() -> None:
+    global TELEGRAM_HEAVY_QUEUE_STARTED
+    if TELEGRAM_HEAVY_QUEUE_STARTED or not TELEGRAM_HEAVY_QUEUE_ENABLED:
+        return
+    with TELEGRAM_HEAVY_QUEUE_START_LOCK:
+        if TELEGRAM_HEAVY_QUEUE_STARTED:
+            return
+        for i in range(TELEGRAM_HEAVY_QUEUE_WORKERS):
+            worker = threading.Thread(
+                target=_telegram_heavy_queue_worker,
+                args=(i + 1,),
+                name=f"telegram-heavy-queue-{i + 1}",
+                daemon=True,
+            )
+            worker.start()
+        TELEGRAM_HEAVY_QUEUE_STARTED = True
+        _log_event(
+            "info",
+            "telegram_queue",
+            "Heavy Telegram queue started",
+            code="telegram_heavy_queue_started",
+            workers=TELEGRAM_HEAVY_QUEUE_WORKERS,
+            max_size=TELEGRAM_HEAVY_QUEUE_MAX_SIZE,
+            heavy_commands=sorted(TELEGRAM_HEAVY_COMMANDS),
+        )
+
+
+def _enqueue_telegram_heavy_job(payload: Dict, forward_params: Dict[str, str], dedup_key: str) -> bool:
+    _ensure_telegram_heavy_queue_started()
+    command = _telegram_command_from_payload(payload) or "__text__"
+    job = {
+        "payload": payload,
+        "forward_params": dict(forward_params or {}),
+        "dedup_key": dedup_key,
+        "command": command,
+        "enqueued_at": _telegram_queue_now_iso(),
+    }
+    try:
+        TELEGRAM_HEAVY_QUEUE.put_nowait(job)
+        _telegram_queue_metric({"enqueued": 1}, last_enqueued_at=job["enqueued_at"])
+        return True
+    except Full:
+        _telegram_queue_metric({"fallback_submitted": 1}, last_error="telegram_heavy_queue_full")
+        _log_event(
+            "warning",
+            "telegram_queue",
+            "Heavy Telegram queue full; falling back to executor",
+            code="telegram_heavy_queue_full_fallback",
+            command=command,
+            dedup_key=dedup_key,
+            queue_size=TELEGRAM_HEAVY_QUEUE.qsize(),
+            queue_max_size=TELEGRAM_HEAVY_QUEUE_MAX_SIZE,
+        )
+        TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
+        return False
 
 
 def _response_body_contains_quota_error(body_text: str) -> bool:
@@ -657,6 +842,9 @@ def home() -> Response:
             "telegram_dedup_cache_items": len(TELEGRAM_DEDUP_CACHE),
             "telegram_loading_enabled": TELEGRAM_LOADING_ENABLED,
             "telegram_loading_tokens": sorted(TELEGRAM_BOT_TOKENS.keys()),
+            "telegram_heavy_queue": _telegram_queue_metric(),
+            "telegram_heavy_commands": sorted(TELEGRAM_HEAVY_COMMANDS),
+            "telegram_heavy_queue_non_commands": TELEGRAM_HEAVY_QUEUE_NON_COMMANDS,
             "lead_backends": len(_lead_backends()),
             "sepay_backend": bool(PRIMARY_SCRIPT_URL),
         }
@@ -713,9 +901,14 @@ def webhook_telegram() -> Response:
         forward_params["loading_message_id"] = str(loading.get("message_id"))
         forward_params["loading_source"] = "render"
 
+    use_heavy_queue = TELEGRAM_ASYNC_ENABLED and _is_heavy_telegram_update(payload)
     if TELEGRAM_ASYNC_ENABLED:
         # Ack Telegram immediately to avoid webhook timeouts on cold start or slow Apps Script runs.
-        TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
+        queued = False
+        if use_heavy_queue:
+            queued = _enqueue_telegram_heavy_job(payload, forward_params, dedup_key)
+        else:
+            TELEGRAM_EXECUTOR.submit(_forward_telegram_background, payload, forward_params)
         return jsonify({
             "ok": True,
             "accepted": True,
@@ -723,6 +916,8 @@ def webhook_telegram() -> Response:
             "source": "telegram",
             "dedup_key": dedup_key,
             "loading": bool(loading.get("ok")),
+            "queued": bool(queued),
+            "queue": "heavy" if use_heavy_queue else "executor",
         }), 200
 
     ok, attempts = _forward_telegram(payload, forward_params)

@@ -23,6 +23,11 @@ Copy `.env.example` va dien:
 - `TELEGRAM_LOADING_TEXT` (optional): noi dung loading, mac dinh `Dang chay...`.
 - `TELEGRAM_BOT_TOKEN` (optional): token bot mac dinh de Render gui loading.
 - `TELEGRAM_BOT_TOKEN_MAP` (optional): JSON map token theo bot hint, vi du `{"main":"...","buff":"...","uid":"..."}`.
+- `TELEGRAM_HEAVY_QUEUE_ENABLED` (optional, mac dinh `1`): bat queue nhe trong RAM cho lenh nang.
+- `TELEGRAM_HEAVY_QUEUE_WORKERS` (optional, mac dinh `2`): so worker xu ly queue lenh nang.
+- `TELEGRAM_HEAVY_QUEUE_MAX_SIZE` (optional, mac dinh `200`): so job toi da trong queue.
+- `TELEGRAM_HEAVY_QUEUE_NON_COMMANDS` (optional, mac dinh `1`): dua text khong phai command vao queue vi bot dung text de check UID/link.
+- `TELEGRAM_HEAVY_COMMANDS` (optional): danh sach command nang cach nhau bang dau phay.
 - `TELEGRAM_FAILOVER_STRATEGY` (optional, mac dinh `priority`):
   - `priority`: luon chon URL dau tien trong `TELEGRAM_SCRIPT_URLS`.
   - `hash`: phan tan deterministic theo `update_id`, moi update van chi gui 1 backend.
@@ -65,6 +70,13 @@ Neu can chia tai Telegram, dung `TELEGRAM_FAILOVER_STRATEGY=hash`; khong dung re
 
 Neu bat `TELEGRAM_LOADING_ENABLED=1` va da set token, LB se gui tin `Dang chay...` ngay lap tuc roi truyen `loading_message_id` ve Apps Script.
 Apps Script se khong tao loading trung; lenh thuong se xoa tin loading khi xu ly xong, rieng `/viplike` se tan dung tin loading do lam workflow message.
+
+Queue nhe cho lenh nang:
+
+- Queue nay nam trong RAM cua Render, khong ben vung neu service restart.
+- Dung de dieu tiet `/check`, `/checkpost`, `/viplike`, `/lammoiviplike` va text check UID/link, tranh day qua nhieu request vao Apps Script cung luc.
+- Callback button khong dua vao queue de nut bam van phan hoi nhanh.
+- Neu queue day, LB fallback sang executor cu de khong mat lenh.
 
 Neu muc tieu la giam quota cho app chinh (app chinh giu SePay + task he thong):
 
