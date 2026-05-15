@@ -216,8 +216,8 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-CHECKER_CACHE_VERSION = "step50_viplike_lock_cleanup_v1"
-DEBUG_LOG_VERSION = "step50_viplike_lock_cleanup_v1_2026-05-15"
+CHECKER_CACHE_VERSION = "step51_viplike_loading_skip_v1"
+DEBUG_LOG_VERSION = "step51_viplike_loading_skip_v1_2026-05-16"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -581,6 +581,18 @@ def _is_heavy_telegram_update(payload: Dict) -> bool:
 def _send_telegram_loading_message(payload: Dict, bot_hint: str) -> Dict:
     if not TELEGRAM_LOADING_ENABLED:
         return {"ok": False, "skipped": True, "reason": "loading_disabled"}
+
+    text = _telegram_text_from_payload(payload)
+    command = _telegram_command_from_payload(payload)
+    # VIPLIKE flow in Apps Script already manages its own interactive message lifecycle.
+    # Sending a Render-side loading message here can leave stale "Đang chạy..." bubbles
+    # when users continue with numeric quantity input.
+    if command in ("/viplike", "/viplikeoff"):
+        return {"ok": False, "skipped": True, "reason": "viplike_managed_by_apps_script"}
+    # Skip loading message for pure numeric replies (e.g. "50" in VIPLIKE quantity step).
+    # This prevents visual "stuck loading" when the number is processed by Apps Script state.
+    if text and re.fullmatch(r"\d{1,8}", text.strip()):
+        return {"ok": False, "skipped": True, "reason": "numeric_reply_skip"}
 
     chat_id, text = _telegram_text_message_target(payload)
     if not chat_id or not text:
