@@ -419,6 +419,23 @@ def parse_cookie_json(raw: str) -> Dict[str, str]:
     return cleaned
 
 
+def parse_cookie_header(raw: str) -> Dict[str, str]:
+    value = str(raw or "").strip()
+    if not value:
+        return {}
+    out: Dict[str, str] = {}
+    for part in value.split(";"):
+        token = str(part or "").strip()
+        if not token or "=" not in token:
+            continue
+        key, val = token.split("=", 1)
+        ck = str(key or "").strip()
+        cv = str(val or "").strip()
+        if ck and cv:
+            out[ck] = cv
+    return out
+
+
 def normalize_social_username(raw: Any) -> str:
     value = str(raw or "").strip()
     if not value:
@@ -766,6 +783,17 @@ def load_default_cookies() -> Dict[str, str]:
         legacy_pool = parse_cookie_pool_json(raw_json)
         if legacy_pool:
             cookies = dict(legacy_pool[0])
+
+    # Legacy header-style env support.
+    if not cookies:
+        header_value = (
+            os.getenv("UID_CHECK_COOKIE", "").strip()
+            or os.getenv("FB_COOKIE_HEADER", "").strip()
+            or os.getenv("UID_CHECKER_FB_COOKIE_HEADER", "").strip()
+            or os.getenv("FACEBOOK_COOKIE_HEADER", "").strip()
+            or os.getenv("FACEBOOK_COOKIE", "").strip()
+        )
+        cookies = parse_cookie_header(header_value)
 
     # Secondary: allow direct c_user/xs env vars.
     c_user = os.getenv("UID_CHECKER_FB_C_USER", "").strip()
@@ -1679,7 +1707,12 @@ def build_uid_probe_header_candidates() -> List[Dict[str, str]]:
     return out
 
 
-async def resolve_uid_from_facebook_url(url_raw: Any, proxy: Optional[str] = None) -> str:
+async def resolve_uid_from_facebook_url(
+    url_raw: Any,
+    proxy: Optional[str] = None,
+    cookies: Optional[Dict[str, str]] = None,
+    cookies_pool: Optional[List[Dict[str, str]]] = None,
+) -> str:
     normalized = normalize_url_input(url_raw)
     direct_uid = extract_uid_from_url(normalized)
     if direct_uid:
@@ -1692,39 +1725,44 @@ async def resolve_uid_from_facebook_url(url_raw: Any, proxy: Optional[str] = Non
     header_candidates = build_uid_probe_header_candidates()
 
     timeout = aiohttp.ClientTimeout(total=max(5.0, HTTP_TIMEOUT_SECONDS))
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async def probe_uid_once(probe_url: str, headers: Dict[str, str]) -> str:
-                try:
-                    async with session.get(
-                        probe_url,
-                        headers=headers,
-                        proxy=proxy,
-                        allow_redirects=True,
-                    ) as resp:
-                        body = await resp.text(errors="ignore")
-                        uid_from_html = extract_uid_from_html(body)
-                        if uid_from_html:
-                            return uid_from_html
+    cookie_candidates = build_cookie_candidates(cookies, cookies_pool)
+    if not cookie_candidates:
+        cookie_candidates = [{"source": "no_cookie", "cookies": {}}]
+    for candidate in cookie_candidates:
+        candidate_cookies = normalize_cookies(candidate.get("cookies") if isinstance(candidate, dict) else None)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, cookies=candidate_cookies) as session:
+                async def probe_uid_once(probe_url: str, headers: Dict[str, str]) -> str:
+                    try:
+                        async with session.get(
+                            probe_url,
+                            headers=headers,
+                            proxy=proxy,
+                            allow_redirects=True,
+                        ) as resp:
+                            body = await resp.text(errors="ignore")
+                            uid_from_html = extract_uid_from_html(body)
+                            if uid_from_html:
+                                return uid_from_html
 
-                        uid_from_final_url = extract_uid_from_url(str(resp.url))
-                        if uid_from_final_url:
-                            return uid_from_final_url
-                except Exception:
+                            uid_from_final_url = extract_uid_from_url(str(resp.url))
+                            if uid_from_final_url:
+                                return uid_from_final_url
+                    except Exception:
+                        return ""
                     return ""
-                return ""
 
-            for headers in header_candidates:
-                tasks = [probe_uid_once(probe_url, headers) for probe_url in probe_urls]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for uid_candidate in results:
-                    if isinstance(uid_candidate, Exception):
-                        continue
-                    resolved = normalize_uid(uid_candidate)
-                    if resolved:
-                        return resolved
-    except Exception:
-        return ""
+                for headers in header_candidates:
+                    tasks = [probe_uid_once(probe_url, headers) for probe_url in probe_urls]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for uid_candidate in results:
+                        if isinstance(uid_candidate, Exception):
+                            continue
+                        resolved = normalize_uid(uid_candidate)
+                        if resolved:
+                            return resolved
+        except Exception:
+            continue
 
     return ""
 
@@ -2736,6 +2774,26 @@ def ensure_api_key(x_api_key: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="invalid_api_key")
 
 
+def pick_uid_from_fallback_result(result_raw: Any) -> str:
+    result = result_raw if isinstance(result_raw, dict) else {}
+    direct_uid = normalize_uid(result.get("uid"))
+    if direct_uid:
+        return direct_uid
+
+    signals = result.get("signals") if isinstance(result.get("signals"), dict) else {}
+    url_public = signals.get("urlPublic") if isinstance(signals.get("urlPublic"), list) else []
+    for item in url_public:
+        if not isinstance(item, dict):
+            continue
+        uid = normalize_uid(item.get("uid"))
+        if uid:
+            return uid
+        uid = extract_uid_from_url(str(item.get("finalUrl") or ""))
+        if uid:
+            return uid
+    return ""
+
+
 @app.get("/health")
 async def health() -> Dict[str, Any]:
     return {
@@ -2774,6 +2832,18 @@ async def get_uid(url: Optional[str] = None, proxy: Optional[str] = None, x_api_
     if uid:
         return {"success": True, "uid": uid, "url": normalized_url}
 
+    if "facebook.com/" in normalized_url.lower() or "fb.com/" in normalized_url.lower():
+        fallback = await check_facebook_url_without_uid(normalized_url, proxy, None, None)
+        fallback_uid = pick_uid_from_fallback_result(fallback)
+        if fallback_uid:
+            return {
+                "success": True,
+                "uid": fallback_uid,
+                "url": normalized_url,
+                "source": "url_fallback",
+                "reason": str(fallback.get("reason") or ""),
+            }
+
     return JSONResponse(
         status_code=404,
         content={"success": False, "error": "Không tìm thấy UID", "url": normalized_url},
@@ -2788,10 +2858,23 @@ async def get_uid_post(req: CheckRequest, x_api_key: Optional[str] = Header(defa
     if not fb_url:
         return JSONResponse(status_code=400, content={"success": False, "error": "Thiếu tham số url"})
 
-    uid = await resolve_uid_from_facebook_url(fb_url, req.proxy)
+    request_pool = req.cookiesPool or req.cookies_pool
+    uid = await resolve_uid_from_facebook_url(fb_url, req.proxy, req.cookies, request_pool)
     normalized_url = normalize_url_input(fb_url)
     if uid:
         return {"success": True, "uid": uid, "url": normalized_url}
+
+    if "facebook.com/" in normalized_url.lower() or "fb.com/" in normalized_url.lower():
+        fallback = await check_facebook_url_without_uid(normalized_url, req.proxy, req.cookies, request_pool)
+        fallback_uid = pick_uid_from_fallback_result(fallback)
+        if fallback_uid:
+            return {
+                "success": True,
+                "uid": fallback_uid,
+                "url": normalized_url,
+                "source": "url_fallback",
+                "reason": str(fallback.get("reason") or ""),
+            }
 
     return JSONResponse(
         status_code=404,
@@ -2837,12 +2920,12 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
     ensure_api_key(x_api_key)
 
     raw_url = str(req.url or "").strip()
+    request_pool = req.cookiesPool or req.cookies_pool
     uid = normalize_uid(req.uid) or extract_uid_from_url(raw_url)
     if not uid and raw_url:
-        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy)
+        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy, req.cookies, request_pool)
     if not uid:
         if raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()):
-            request_pool = req.cookiesPool or req.cookies_pool
             fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
             fallback["ok"] = True
             return fallback
@@ -2853,7 +2936,6 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
             "httpCode": 0,
         }
 
-    request_pool = req.cookiesPool or req.cookies_pool
     result = await check_uid(uid, req.proxy, req.cookies, request_pool)
     result_status = str(result.get("status") or "").upper()
     raw_url_is_facebook = bool(raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()))
@@ -2902,9 +2984,13 @@ async def latest_post(req: CheckRequest, x_api_key: Optional[str] = Header(defau
 
 async def latest_post_impl(req: CheckRequest) -> Dict[str, Any]:
     raw_url = str(req.url or "").strip()
+    request_pool = req.cookiesPool or req.cookies_pool
     uid = normalize_uid(req.uid) or extract_uid_from_url(raw_url)
     if not uid and raw_url:
-        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy)
+        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy, req.cookies, request_pool)
+    if not uid and raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()):
+        fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
+        uid = pick_uid_from_fallback_result(fallback)
 
     if not uid:
         return {
@@ -2918,7 +3004,6 @@ async def latest_post_impl(req: CheckRequest) -> Dict[str, Any]:
             "httpCode": 0,
         }
 
-    request_pool = req.cookiesPool or req.cookies_pool
     return await get_latest_facebook_post(uid, req.proxy, req.cookies, request_pool)
 
 

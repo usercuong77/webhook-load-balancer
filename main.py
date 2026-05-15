@@ -1215,12 +1215,50 @@ def _checker_ready() -> bool:
 
 
 def _checker_api_key_header() -> str:
-    return str(request.headers.get("X-Api-Key", "") or request.headers.get("x-api-key", "")).strip()
+    header_key = str(
+        request.headers.get("X-Api-Key", "")
+        or request.headers.get("x-api-key", "")
+        or request.headers.get("Authorization", "")
+    ).strip()
+    if header_key.lower().startswith("bearer "):
+        header_key = header_key[7:].strip()
+    if header_key:
+        return header_key
+
+    query_key = str(
+        request.args.get("apiKey", "")
+        or request.args.get("api_key", "")
+        or request.args.get("key", "")
+    ).strip()
+    if query_key:
+        return query_key
+
+    payload = _payload_dict()
+    if isinstance(payload, dict):
+        return str(
+            payload.get("apiKey", "")
+            or payload.get("api_key", "")
+            or payload.get("key", "")
+        ).strip()
+    return ""
 
 
 def _checker_payload() -> Dict:
     payload = _payload_dict()
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    # Keep payload strict for checker models.
+    out = {}
+    for key in ("uid", "url", "proxy", "cookies", "cookiesPool", "cookies_pool"):
+        if key in payload and payload.get(key) not in (None, ""):
+            out[key] = payload.get(key)
+    return out
+
+
+def _json_response(payload: Dict, status_code: int = 200) -> Response:
+    response = jsonify(payload)
+    response.status_code = int(status_code or 200)
+    return response
 
 
 def _run_checker_async(coro):
@@ -1238,13 +1276,13 @@ def _run_checker_async(coro):
 
 def _checker_unavailable_response() -> Response:
     status = 503 if UID_CHECKER_ENABLED else 404
-    return jsonify({
+    return _json_response({
         "ok": False,
         "error": "uid_checker_unavailable",
         "enabled": UID_CHECKER_ENABLED,
         "imported": UID_CHECKER_SERVICE is not None,
         "importError": UID_CHECKER_IMPORT_ERROR,
-    }), status
+    }, status)
 
 
 def _checker_response(result) -> Response:
@@ -1270,11 +1308,11 @@ def _checker_exception_response(exc: Exception) -> Response:
             path=request.path,
             error=str(exc),
         )
-    return jsonify({
+    return _json_response({
         "ok": False,
         "error": "uid_checker_error" if status_code >= 500 else "uid_checker_rejected",
         "detail": detail,
-    }), status_code
+    }, status_code)
 
 
 def _checker_cache_metric(name: str, delta: int = 1) -> None:
@@ -1403,7 +1441,8 @@ def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_fact
     if cached:
         return _checker_cached_response(cached)
     response = _call_checker(coro_factory)
-    _checker_cache_set(cache_key, response, ttl_seconds, namespace)
+    if int(getattr(response, "status_code", 500) or 500) < 400:
+        _checker_cache_set(cache_key, response, ttl_seconds, namespace)
     if cache_key:
         response.headers["X-Checker-Cache"] = "MISS"
     return response
@@ -1425,7 +1464,7 @@ def _checker_response_json(response: Response):
 
 def _checker_auth_error_response() -> Optional[Response]:
     if UID_CHECKER_API_KEY and _checker_api_key_header() != UID_CHECKER_API_KEY:
-        return jsonify({"ok": False, "error": "invalid_api_key"}), 401
+        return _json_response({"ok": False, "error": "invalid_api_key"}, 401)
     return None
 
 
