@@ -1862,6 +1862,8 @@ async def check_facebook_url_without_uid(
                     elif is_facebook_direct_identity_url(normalized) and (
                         "auth_wall" in reason.lower()
                         or "unsupported_browser" in reason.lower()
+                        or "checkpoint" in reason.lower()
+                        or "error" in reason.lower()
                     ):
                         unknown_candidate = unknown_candidate or {
                             "uid": "",
