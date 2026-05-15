@@ -264,20 +264,20 @@ def get_latest_post_total_timeout_seconds() -> float:
 
 
 def get_latest_post_uid_resolve_timeout_seconds() -> float:
-    raw = str(os.getenv("LATEST_POST_UID_RESOLVE_TIMEOUT", "5")).strip()
+    raw = str(os.getenv("LATEST_POST_UID_RESOLVE_TIMEOUT", "10")).strip()
     try:
         value = float(raw)
     except Exception:
-        value = 5.0
+        value = 10.0
     return max(2.0, min(25.0, value))
 
 
 def get_latest_post_uid_fallback_timeout_seconds() -> float:
-    raw = str(os.getenv("LATEST_POST_UID_FALLBACK_TIMEOUT", "4")).strip()
+    raw = str(os.getenv("LATEST_POST_UID_FALLBACK_TIMEOUT", "8")).strip()
     try:
         value = float(raw)
     except Exception:
-        value = 4.0
+        value = 8.0
     return max(2.0, min(20.0, value))
 
 
