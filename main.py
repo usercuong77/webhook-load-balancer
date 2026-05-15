@@ -208,7 +208,7 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-DEBUG_LOG_VERSION = "step37_add_addpost_queue_2026-05-15"
+DEBUG_LOG_VERSION = "step39_text_only_profile_name_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(

@@ -123,6 +123,7 @@ PROFILE_NAME_BLOCKLIST = [
     "browser is not supported",
     "browser not supported",
     "unsupported browser",
+    "error",
     "trinh duyet nay khong duoc ho tro",
     "trình duyệt này không được hỗ trợ",
     "dang nhap",
