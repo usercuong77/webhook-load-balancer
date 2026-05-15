@@ -1339,7 +1339,10 @@ def _checker_cache_set(cache_key: str, response: Response, ttl_seconds: int, nam
         reason = str(parsed_body.get("reason") or parsed_body.get("error") or parsed_body.get("detail") or "").strip().lower()
         method = str(parsed_body.get("method") or "").strip().lower()
         status = str(parsed_body.get("status") or "").strip().lower()
+        post_id = str(parsed_body.get("postId") or parsed_body.get("post_id") or "").strip()
         if reason in {"invalid_uid", "latest_post_timeout"} or method == "latest_post_timeout":
+            return
+        if namespace.startswith("latest_post") and parsed_body.get("ok") is False and not post_id:
             return
         if namespace.startswith("check") and status == "unknown" and reason:
             return
