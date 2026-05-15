@@ -1555,18 +1555,22 @@ async def fetch_latest_facebook_post_once(
     if not normalized_session_cookies and probe_urls:
         def _probe_rank(url_raw: Any) -> int:
             url = str(url_raw or "").lower()
-            if "m.facebook.com" in url:
+            if "www.facebook.com/profile.php" in url and "sk=posts" in url:
                 return 0
-            if "touch.facebook.com" in url:
+            if "www.facebook.com/profile.php" in url:
                 return 1
-            if "mbasic.facebook.com" in url:
+            if "www.facebook.com/" in url:
                 return 2
-            if "sk=posts" in url:
+            if "m.facebook.com" in url:
                 return 3
-            return 4
+            if "touch.facebook.com" in url:
+                return 4
+            if "mbasic.facebook.com" in url:
+                return 5
+            return 6
         probe_urls = sorted(probe_urls, key=_probe_rank)
     attempts: List[Dict[str, Any]] = []
-    max_attempts = 5 if normalized_session_cookies else max(5, min(7, len(probe_urls) + 1))
+    max_attempts = 5 if normalized_session_cookies else max(4, min(5, len(probe_urls)))
     attempts_made = 0
 
     plan: List[Tuple[str, str]] = []
