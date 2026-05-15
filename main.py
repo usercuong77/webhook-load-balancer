@@ -205,7 +205,7 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-DEBUG_LOG_VERSION = "step35_share_url_uid_resolve_2026-05-15"
+DEBUG_LOG_VERSION = "step36_uid_first_checkpost_batch_dedupe_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -1442,6 +1442,35 @@ def _normalize_checker_batch_payload(item_raw) -> Tuple[Dict, str, str]:
     return payload, item_id, raw_input
 
 
+def _resolve_checker_batch_payload_uid(payload_raw: Dict) -> Dict:
+    payload = dict(payload_raw or {})
+    if str(payload.get("uid") or "").strip():
+        return payload
+
+    raw_url = str(payload.get("url") or "").strip()
+    if not raw_url:
+        return payload
+    lowered = raw_url.lower()
+    if "facebook.com/" not in lowered and "fb.com/" not in lowered:
+        return payload
+    if not _checker_ready() or not hasattr(UID_CHECKER_SERVICE, "resolve_uid_from_facebook_url"):
+        return payload
+
+    try:
+        uid = str(_run_checker_async(
+            UID_CHECKER_SERVICE.resolve_uid_from_facebook_url(
+                raw_url,
+                payload.get("proxy") or None,
+            )
+        ) or "").strip()
+    except Exception:
+        uid = ""
+
+    if uid:
+        payload["uid"] = uid
+    return payload
+
+
 def _checker_batch_items() -> Tuple[List, Optional[Response]]:
     body = _checker_payload()
     items = body.get("items") if isinstance(body, dict) else []
@@ -1490,6 +1519,7 @@ def _checker_batch_response(kind: str, ttl_seconds: int, runner) -> Response:
     cache_hits = 0
     for index, item_raw in enumerate(items):
         payload, item_id, raw_input = _normalize_checker_batch_payload(item_raw)
+        payload = _resolve_checker_batch_payload_uid(payload)
         try:
             result = _run_checker_cached_json(
                 kind,
