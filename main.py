@@ -193,6 +193,7 @@ TELEGRAM_DURABLE_QUEUE_TIMEOUT_SEC = max(2, _env_int("TELEGRAM_DURABLE_QUEUE_TIM
 TELEGRAM_DURABLE_QUEUE_IDLE_SEC = max(1, _env_int("TELEGRAM_DURABLE_QUEUE_IDLE_SEC", 2))
 TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP = _env_bool("TELEGRAM_DURABLE_QUEUE_RECOVER_ON_STARTUP", True)
 TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT = max(0, _env_int("TELEGRAM_DURABLE_QUEUE_RECOVER_LIMIT", 100))
+TELEGRAM_DURABLE_EMPTY_ACTIVE_FULL_SCAN_SEC = max(10, _env_int("TELEGRAM_DURABLE_EMPTY_ACTIVE_FULL_SCAN_SEC", 30))
 TELEGRAM_HEAVY_QUEUE_NAMES = ("check", "checkpost", "viplike", "viplike_refresh", "misc")
 TELEGRAM_HEAVY_QUEUE_SCAN_ORDER = ("check", "checkpost", "viplike", "viplike_refresh", "misc")
 TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
@@ -222,6 +223,7 @@ TELEGRAM_HEAVY_QUEUE_START_LOCK = threading.Lock()
 TELEGRAM_HEAVY_QUEUE_METRICS_LOCK = threading.Lock()
 TELEGRAM_DURABLE_QUEUE_RECOVERED = False
 TELEGRAM_DURABLE_QUEUE_RECOVER_LOCK = threading.Lock()
+TELEGRAM_DURABLE_LAST_EMPTY_ACTIVE_FULL_SCAN_AT = 0.0
 TELEGRAM_HEAVY_QUEUE_METRICS = {
     "enqueued": 0,
     "processed": 0,
@@ -727,6 +729,7 @@ def _telegram_durable_queue_sizes() -> Dict[str, int]:
 
 
 def _telegram_active_durable_queue_names() -> List[str]:
+    global TELEGRAM_DURABLE_LAST_EMPTY_ACTIVE_FULL_SCAN_AT
     if not _durable_queue_configured():
         return []
     try:
@@ -744,6 +747,12 @@ def _telegram_active_durable_queue_names() -> List[str]:
         for item in raw_names
         if str(item or "").strip()
     }
+    if not names_set:
+        now = time.time()
+        if now - TELEGRAM_DURABLE_LAST_EMPTY_ACTIVE_FULL_SCAN_AT >= TELEGRAM_DURABLE_EMPTY_ACTIVE_FULL_SCAN_SEC:
+            TELEGRAM_DURABLE_LAST_EMPTY_ACTIVE_FULL_SCAN_AT = now
+            return list(TELEGRAM_HEAVY_QUEUE_SCAN_ORDER)
+        return []
     return [name for name in TELEGRAM_HEAVY_QUEUE_SCAN_ORDER if name in names_set]
 
 
