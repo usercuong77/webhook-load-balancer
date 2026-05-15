@@ -1498,14 +1498,28 @@ async def fetch_latest_facebook_post_once(
             "httpCode": 0,
         }
 
-    timeout = aiohttp.ClientTimeout(total=max(5.0, HTTP_TIMEOUT_SECONDS))
     normalized_session_cookies = normalize_cookies(session_cookies)
-    user_agents_raw = [
-        pick_user_agent(),
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    ]
+    request_timeout_seconds = max(
+        2.5,
+        min(
+            float(HTTP_TIMEOUT_SECONDS),
+            6.0 if normalized_session_cookies else 3.5,
+        ),
+    )
+    timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+    if normalized_session_cookies:
+        user_agents_raw = [
+            pick_user_agent(),
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+        ]
+    else:
+        user_agents_raw = [
+            PUBLIC_PROFILE_USER_AGENT,
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+        ]
     user_agents: List[str] = []
     seen_ua = set()
     for item in user_agents_raw:
@@ -1527,14 +1541,21 @@ async def fetch_latest_facebook_post_once(
     }
     probe_urls = build_facebook_latest_post_probe_urls(normalized_uid)
     attempts: List[Dict[str, Any]] = []
+    max_attempts = 10 if normalized_session_cookies else 4
+    attempts_made = 0
 
     async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
         for probe_url in probe_urls:
+            if attempts_made >= max_attempts:
+                break
             for user_agent in user_agents:
+                if attempts_made >= max_attempts:
+                    break
                 headers = dict(headers_base)
                 headers["User-Agent"] = user_agent
                 headers.update(build_facebook_navigation_hint_headers(user_agent))
                 try:
+                    attempts_made += 1
                     async with session.get(
                         probe_url,
                         headers=headers,
@@ -1624,6 +1645,11 @@ async def get_latest_facebook_post(
     cookies_pool: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     candidates = build_cookie_candidates(cookies, cookies_pool)
+    if len(candidates) > 1:
+        with_cookie = [item for item in candidates if str(item.get("source") or "") != "no_cookie"]
+        no_cookie = [item for item in candidates if str(item.get("source") or "") == "no_cookie"]
+        if with_cookie:
+            candidates = with_cookie + no_cookie
     cookie_attempts: List[Dict[str, Any]] = []
     final_result: Optional[Dict[str, Any]] = None
     best_failure: Optional[Dict[str, Any]] = None
