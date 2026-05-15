@@ -172,7 +172,7 @@ TELEGRAM_HEAVY_QUEUE_NON_COMMANDS = _env_bool("TELEGRAM_HEAVY_QUEUE_NON_COMMANDS
 TELEGRAM_HEAVY_COMMANDS = _parse_csv_set(
     os.getenv(
         "TELEGRAM_HEAVY_COMMANDS",
-        "/check,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
+        "/check,/add,/addpost,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
     )
 )
 TELEGRAM_DURABLE_QUEUE_ENABLED = _env_bool("TELEGRAM_DURABLE_QUEUE_ENABLED", True)
@@ -199,6 +199,8 @@ TELEGRAM_HEAVY_QUEUE_NAMES = ("check", "checkpost", "viplike", "viplike_refresh"
 TELEGRAM_HEAVY_QUEUE_SCAN_ORDER = ("check", "checkpost", "viplike", "viplike_refresh", "misc")
 TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/check": "check",
+    "/add": "check",
+    "/addpost": "checkpost",
     "/checkpost": "checkpost",
     "/viplike": "viplike",
     "/viplikeoff": "viplike",
@@ -206,7 +208,7 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-DEBUG_LOG_VERSION = "step36_uid_first_checkpost_batch_dedupe_2026-05-15"
+DEBUG_LOG_VERSION = "step37_add_addpost_queue_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
