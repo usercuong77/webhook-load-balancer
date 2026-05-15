@@ -118,7 +118,17 @@ PROFILE_NAME_BLOCKLIST = [
     "log in",
     "login",
     "sign up",
+    "sorry, something went wrong",
+    "something went wrong",
+    "browser is not supported",
+    "browser not supported",
+    "unsupported browser",
+    "trinh duyet nay khong duoc ho tro",
+    "trình duyệt này không được hỗ trợ",
     "dang nhap",
+    "đăng nhập",
+    "dang ky",
+    "đăng ký",
     "tao tai khoan",
     "create new account",
     "forgot password",
@@ -1719,6 +1729,9 @@ def is_valid_profile_name(raw_name: str) -> bool:
 
     low = name.lower()
     if contains_any(low, PROFILE_NAME_BLOCKLIST):
+        return False
+
+    if re.search(r"(sorry|browser|unsupported|login|sign up)", low):
         return False
 
     return bool(re.search(r"[A-Za-zÀ-ỹ]", name))
