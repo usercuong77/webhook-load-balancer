@@ -281,6 +281,42 @@ def get_latest_post_uid_fallback_timeout_seconds() -> float:
     return max(2.0, min(20.0, value))
 
 
+def get_latest_post_no_cookie_timeout_seconds() -> float:
+    raw = str(os.getenv("LATEST_POST_NO_COOKIE_TIMEOUT", "5.8")).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 5.8
+    return max(2.8, min(12.0, value))
+
+
+def get_latest_post_with_cookie_timeout_seconds() -> float:
+    raw = str(os.getenv("LATEST_POST_WITH_COOKIE_TIMEOUT", "4.5")).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 4.5
+    return max(2.5, min(12.0, value))
+
+
+def get_latest_post_no_cookie_max_attempts() -> int:
+    raw = str(os.getenv("LATEST_POST_NO_COOKIE_MAX_ATTEMPTS", "6")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 6
+    return max(3, min(12, value))
+
+
+def get_latest_post_with_cookie_max_attempts() -> int:
+    raw = str(os.getenv("LATEST_POST_WITH_COOKIE_MAX_ATTEMPTS", "5")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 5
+    return max(2, min(10, value))
+
+
 def build_forward_url(base_url: str, query_string: str = "") -> str:
     target = str(base_url or "").strip()
     if not target:
@@ -1541,12 +1577,10 @@ async def fetch_latest_facebook_post_once(
         }
 
     normalized_session_cookies = normalize_cookies(session_cookies)
-    request_timeout_seconds = max(
-        2.0,
-        min(
-            float(HTTP_TIMEOUT_SECONDS),
-            4.5 if normalized_session_cookies else 2.8,
-        ),
+    request_timeout_seconds = (
+        get_latest_post_with_cookie_timeout_seconds()
+        if normalized_session_cookies
+        else get_latest_post_no_cookie_timeout_seconds()
     )
     timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
     if normalized_session_cookies:
@@ -1602,7 +1636,11 @@ async def fetch_latest_facebook_post_once(
             return 6
         probe_urls = sorted(probe_urls, key=_probe_rank)
     attempts: List[Dict[str, Any]] = []
-    max_attempts = 5 if normalized_session_cookies else max(4, min(5, len(probe_urls)))
+    max_attempts = (
+        get_latest_post_with_cookie_max_attempts()
+        if normalized_session_cookies
+        else get_latest_post_no_cookie_max_attempts()
+    )
     attempts_made = 0
 
     plan: List[Tuple[str, str]] = []

@@ -19,7 +19,11 @@ Copy `.env.example` va dien:
 - `UID_CHECKER_ENABLED` (optional, mac dinh `1`): bat endpoint checker tich hop trong LB.
 - `UID_CHECKER_API_KEY` (optional): API key bao ve `/check`, `/get-uid`, `/latest-post`, `/cookie-health`. Nen dat cung gia tri voi `EXTERNAL_CHECKER_API_KEY` trong Apps Script. Neu chua set env, service dung legacy fallback de khong lam gian doan bot.
 - `UID_CHECKER_TIMEOUT` (optional, mac dinh `10`): timeout goi Facebook public probe.
-- `LATEST_POST_TOTAL_TIMEOUT` (optional, mac dinh `15`): timeout tong cho `/latest-post` va `/checkpost`.
+- `LATEST_POST_TOTAL_TIMEOUT` (optional, mac dinh `25`): timeout tong cho `/latest-post` va `/checkpost`.
+- `LATEST_POST_NO_COOKIE_TIMEOUT` (optional, mac dinh `5.8`): timeout nhanh uu tien cho nhanh `no_cookie` khi lay bai moi.
+- `LATEST_POST_NO_COOKIE_MAX_ATTEMPTS` (optional, mac dinh `6`): so probe toi da cho `no_cookie` truoc khi fallback cookie.
+- `LATEST_POST_WITH_COOKIE_TIMEOUT` (optional, mac dinh `4.5`): timeout cho moi lan probe `with_cookie`.
+- `LATEST_POST_WITH_COOKIE_MAX_ATTEMPTS` (optional, mac dinh `5`): so probe toi da cho moi cookie candidate.
 - `CHECKER_CACHE_ENABLED` (optional, mac dinh `1`): bat cache ngan han cho checker tich hop.
 - `CHECKER_GET_UID_CACHE_TTL_SEC` (optional, mac dinh `21600`): TTL cache resolve UID/profile.
 - `CHECKER_CHECK_CACHE_TTL_SEC` (optional, mac dinh `45`): TTL cache live/die.
