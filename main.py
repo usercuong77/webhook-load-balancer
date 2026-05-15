@@ -801,6 +801,7 @@ def _telegram_queue_metric(delta: Optional[Dict] = None, **set_fields) -> Dict:
     out["durable_queue_key"] = TELEGRAM_DURABLE_QUEUE_KEY
     out["durable_processing_key"] = TELEGRAM_DURABLE_PROCESSING_KEY
     out["durable_active_queues_key"] = TELEGRAM_DURABLE_ACTIVE_QUEUES_KEY
+    out["durable_empty_active_full_scan_sec"] = TELEGRAM_DURABLE_EMPTY_ACTIVE_FULL_SCAN_SEC
     out["durable_queue_names"] = list(TELEGRAM_HEAVY_QUEUE_NAMES)
     out["durable_queue_sizes"] = _telegram_durable_queue_sizes() if not delta and not set_fields else {}
     out["durable_queue_total_size"] = sum(
