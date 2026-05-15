@@ -1740,6 +1740,158 @@ def is_auth_wall(text: str, final_url: str = "") -> bool:
     )
 
 
+def is_facebook_direct_identity_url(url_raw: Any) -> bool:
+    normalized = normalize_url_input(url_raw)
+    if not normalized:
+        return False
+    try:
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" not in host and "fb.com" not in host:
+            return False
+        path = (parsed.path or "/").strip("/")
+        if not path:
+            return False
+        first = path.split("/")[0].lower()
+        reserved = {
+            "photo",
+            "photos",
+            "posts",
+            "permalink.php",
+            "story.php",
+            "watch",
+            "reel",
+            "reels",
+            "groups",
+            "pages",
+            "events",
+            "marketplace",
+            "login",
+            "recover",
+            "share",
+        }
+        if first in reserved:
+            return False
+        if first in {"profile.php", "people"}:
+            return True
+        return len([part for part in path.split("/") if part]) == 1
+    except Exception:
+        return False
+
+
+def build_facebook_public_check_urls(url_raw: Any) -> List[str]:
+    normalized = normalize_url_input(url_raw)
+    if not normalized:
+        return []
+    candidates = build_facebook_probe_urls(normalized)
+    try:
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" in host or "fb.com" in host:
+            path = parsed.path or "/"
+            query = f"?{parsed.query}" if parsed.query else ""
+            candidates.append(f"https://touch.facebook.com{path}{query}")
+            candidates.append(f"https://mbasic.facebook.com{path}{query}")
+    except Exception:
+        pass
+    out: List[str] = []
+    seen = set()
+    for item in candidates:
+        key = str(item or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+async def check_facebook_url_without_uid(
+    url_raw: Any,
+    proxy: Optional[str] = None,
+    cookies: Optional[Dict[str, str]] = None,
+    cookies_pool: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    normalized = normalize_url_input(url_raw)
+    if not normalized:
+        return {"uid": "", "status": "UNKNOWN", "reason": "invalid_url", "httpCode": 0}
+
+    candidates = build_cookie_candidates(cookies, cookies_pool)
+    url_candidates = build_facebook_public_check_urls(normalized)
+    dead_candidate: Optional[Dict[str, Any]] = None
+    unknown_candidate: Optional[Dict[str, Any]] = None
+    attempts: List[Dict[str, Any]] = []
+    headers = {
+        "User-Agent": PUBLIC_PROFILE_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://m.facebook.com/",
+    }
+    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+
+    for cookie_index, candidate in enumerate(candidates):
+        candidate_cookies = normalize_cookies(candidate.get("cookies") if isinstance(candidate, dict) else None)
+        source = str(candidate.get("source") if isinstance(candidate, dict) else "") or f"cookie_{cookie_index + 1}"
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, cookies=candidate_cookies) as session:
+                for index, probe_url in enumerate(url_candidates):
+                    signal = await probe_public_page(f"url_{index + 1}", probe_url, session, headers, proxy)
+                    signal["cookieSource"] = source
+                    attempts.append(signal)
+                    status = str(signal.get("status") or "").upper()
+                    name = str(signal.get("name") or "").strip()
+                    http_code = 200 if status == "LIVE" else 0
+                    reason = str(signal.get("reason") or "")
+                    if status == "LIVE":
+                        result = {
+                            "uid": "",
+                            "status": "LIVE",
+                            "reason": f"url_public_live:{reason}",
+                            "httpCode": http_code or 200,
+                            "profileName": name if is_valid_profile_name(name) else "",
+                            "signals": {"urlPublic": attempts, "cookieSource": source},
+                        }
+                        return result
+                    if status == "DIE":
+                        dead_candidate = dead_candidate or {
+                            "uid": "",
+                            "status": "DIE",
+                            "reason": f"url_public_die:{reason}",
+                            "httpCode": http_code,
+                            "signals": {"urlPublic": attempts, "cookieSource": source},
+                        }
+                    elif is_facebook_direct_identity_url(normalized) and (
+                        "auth_wall" in reason.lower()
+                        or "unsupported_browser" in reason.lower()
+                    ):
+                        unknown_candidate = unknown_candidate or {
+                            "uid": "",
+                            "status": "LIVE",
+                            "reason": f"url_public_likely_live:{reason}",
+                            "httpCode": http_code or 200,
+                            "profileName": "",
+                            "signals": {"urlPublic": attempts, "cookieSource": source},
+                        }
+                    else:
+                        unknown_candidate = unknown_candidate or {
+                            "uid": "",
+                            "status": "UNKNOWN",
+                            "reason": f"url_public_unknown:{reason}",
+                            "httpCode": http_code,
+                            "signals": {"urlPublic": attempts, "cookieSource": source},
+                        }
+        except Exception as err:
+            attempts.append({"status": "UNKNOWN", "reason": f"url_public_error:{err}", "name": "", "finalUrl": ""})
+            continue
+
+    return dead_candidate or unknown_candidate or {
+        "uid": "",
+        "status": "UNKNOWN",
+        "reason": "invalid_uid",
+        "httpCode": 0,
+        "signals": {"urlPublic": attempts},
+    }
+
+
 def is_unsupported_browser_wall(text: str, final_url: str = "") -> bool:
     low = text.lower()
     url_low = (final_url or "").lower()
@@ -2478,6 +2630,11 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
     if not uid and raw_url:
         uid = await resolve_uid_from_facebook_url(raw_url, req.proxy)
     if not uid:
+        if raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()):
+            request_pool = req.cookiesPool or req.cookies_pool
+            fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
+            fallback["ok"] = True
+            return fallback
         return {
             "uid": "",
             "status": "UNKNOWN",
