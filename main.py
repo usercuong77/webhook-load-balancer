@@ -1436,7 +1436,12 @@ def _call_checker(coro_factory) -> Response:
 
 
 def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_factory) -> Response:
-    cache_key = _checker_cache_key(namespace, key_source) if ttl_seconds > 0 else ""
+    cache_source = {
+        "payload": key_source,
+        # Keep auth context in cache key to prevent unauthorized cache reuse.
+        "auth": _checker_api_key_header() or "__no_api_key__",
+    }
+    cache_key = _checker_cache_key(namespace, cache_source) if ttl_seconds > 0 else ""
     cached = _checker_cache_get(cache_key)
     if cached:
         return _checker_cached_response(cached)
