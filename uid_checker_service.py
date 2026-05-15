@@ -102,15 +102,21 @@ CHECKPOINT_STRONG_KEYWORDS = [
     "bi khoa",
 ]
 
+GENERIC_ERROR_KEYWORDS = [
+    "sorry, something went wrong",
+    "something went wrong",
+    "we're working on getting this fixed",
+    "<title>error</title>",
+    "<title>error facebook</title>",
+    "<title>loi</title>",
+    "<title>lỗi</title>",
+]
+
 PROFILE_LIVE_MARKERS = [
     'profile_id":"',
     'entity_id":"',
     "fb://profile/",
     "fb://page/",
-    "timeline",
-    "friends",
-    "message",
-    "profile.php?id=",
 ]
 
 PROFILE_NAME_BLOCKLIST = [
@@ -152,6 +158,11 @@ PUBLIC_PROFILE_USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) "
     "Version/17.0 Mobile/15E148 Safari/604.1"
 )
+PUBLIC_PROFILE_USER_AGENTS = [
+    PUBLIC_PROFILE_USER_AGENT,
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Mozilla/5.0",
+]
 
 UID_SCRAPE_PATTERNS = [
     r'"userID"\s*:\s*"(\d{8,20})"',
@@ -1683,25 +1694,35 @@ async def resolve_uid_from_facebook_url(url_raw: Any, proxy: Optional[str] = Non
     timeout = aiohttp.ClientTimeout(total=max(5.0, HTTP_TIMEOUT_SECONDS))
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for headers in header_candidates:
-                for probe_url in probe_urls:
-                    try:
-                        async with session.get(
-                            probe_url,
-                            headers=headers,
-                            proxy=proxy,
-                            allow_redirects=True,
-                        ) as resp:
-                            body = await resp.text(errors="ignore")
-                            uid_from_html = extract_uid_from_html(body)
-                            if uid_from_html:
-                                return uid_from_html
+            async def probe_uid_once(probe_url: str, headers: Dict[str, str]) -> str:
+                try:
+                    async with session.get(
+                        probe_url,
+                        headers=headers,
+                        proxy=proxy,
+                        allow_redirects=True,
+                    ) as resp:
+                        body = await resp.text(errors="ignore")
+                        uid_from_html = extract_uid_from_html(body)
+                        if uid_from_html:
+                            return uid_from_html
 
-                            uid_from_final_url = extract_uid_from_url(str(resp.url))
-                            if uid_from_final_url:
-                                return uid_from_final_url
-                    except Exception:
+                        uid_from_final_url = extract_uid_from_url(str(resp.url))
+                        if uid_from_final_url:
+                            return uid_from_final_url
+                except Exception:
+                    return ""
+                return ""
+
+            for headers in header_candidates:
+                tasks = [probe_uid_once(probe_url, headers) for probe_url in probe_urls]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for uid_candidate in results:
+                    if isinstance(uid_candidate, Exception):
                         continue
+                    resolved = normalize_uid(uid_candidate)
+                    if resolved:
+                        return resolved
     except Exception:
         return ""
 
@@ -1779,6 +1800,50 @@ def is_facebook_direct_identity_url(url_raw: Any) -> bool:
         return False
 
 
+def is_facebook_username_identity_url(url_raw: Any) -> bool:
+    normalized = normalize_url_input(url_raw)
+    if not normalized:
+        return False
+    try:
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" not in host and "fb.com" not in host:
+            return False
+        path = (parsed.path or "/").strip("/")
+        if not path:
+            return False
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 1:
+            return False
+        first = parts[0].lower()
+        reserved = {
+            "profile.php",
+            "people",
+            "share",
+            "photo",
+            "photos",
+            "posts",
+            "permalink.php",
+            "story.php",
+            "watch",
+            "reel",
+            "reels",
+            "groups",
+            "pages",
+            "events",
+            "marketplace",
+            "login",
+            "recover",
+        }
+        if first in reserved:
+            return False
+        if re.fullmatch(r"\d{8,20}", first):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def build_facebook_public_check_urls(url_raw: Any) -> List[str]:
     normalized = normalize_url_input(url_raw)
     if not normalized:
@@ -1817,15 +1882,19 @@ async def check_facebook_url_without_uid(
 
     candidates = build_cookie_candidates(cookies, cookies_pool)
     url_candidates = build_facebook_public_check_urls(normalized)
+    header_candidates = build_public_probe_headers()
+    if not header_candidates:
+        header_candidates = [
+            {
+                "User-Agent": PUBLIC_PROFILE_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://m.facebook.com/",
+            }
+        ]
     dead_candidate: Optional[Dict[str, Any]] = None
     unknown_candidate: Optional[Dict[str, Any]] = None
     attempts: List[Dict[str, Any]] = []
-    headers = {
-        "User-Agent": PUBLIC_PROFILE_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://m.facebook.com/",
-    }
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
     for cookie_index, candidate in enumerate(candidates):
@@ -1833,17 +1902,43 @@ async def check_facebook_url_without_uid(
         source = str(candidate.get("source") if isinstance(candidate, dict) else "") or f"cookie_{cookie_index + 1}"
         try:
             async with aiohttp.ClientSession(timeout=timeout, cookies=candidate_cookies) as session:
-                for index, probe_url in enumerate(url_candidates):
-                    signal = await probe_public_page(f"url_{index + 1}", probe_url, session, headers, proxy)
+                tasks = []
+                task_inputs: List[Tuple[str, str]] = []
+                for header_index, headers in enumerate(header_candidates):
+                    for index, probe_url in enumerate(url_candidates):
+                        source_name = f"url_{index + 1}_h{header_index + 1}"
+                        tasks.append(probe_public_page(source_name, probe_url, session, headers, proxy))
+                        task_inputs.append((source_name, probe_url))
+                signals_raw = await asyncio.gather(*tasks, return_exceptions=True)
+                for index, signal_raw in enumerate(signals_raw):
+                    if isinstance(signal_raw, Exception):
+                        source_name = task_inputs[index][0] if index < len(task_inputs) else "url_probe"
+                        attempts.append({
+                            "status": "UNKNOWN",
+                            "reason": f"{source_name}_error:{signal_raw}",
+                            "name": "",
+                            "finalUrl": "",
+                            "uid": "",
+                            "cookieSource": source,
+                        })
+                        continue
+                    signal = signal_raw
+                    source_name, probe_url = task_inputs[index] if index < len(task_inputs) else ("url_probe", normalized)
                     signal["cookieSource"] = source
                     attempts.append(signal)
                     status = str(signal.get("status") or "").upper()
                     name = str(signal.get("name") or "").strip()
+                    signal_final = str(signal.get("finalUrl") or "")
+                    signal_uid = (
+                        normalize_uid(signal.get("uid"))
+                        or extract_uid_from_url(signal_final)
+                        or extract_uid_from_url(probe_url)
+                    )
                     http_code = 200 if status == "LIVE" else 0
                     reason = str(signal.get("reason") or "")
                     if status == "LIVE":
                         result = {
-                            "uid": "",
+                            "uid": signal_uid,
                             "status": "LIVE",
                             "reason": f"url_public_live:{reason}",
                             "httpCode": http_code or 200,
@@ -1853,20 +1948,20 @@ async def check_facebook_url_without_uid(
                         return result
                     if status == "DIE":
                         dead_candidate = dead_candidate or {
-                            "uid": "",
+                            "uid": signal_uid,
                             "status": "DIE",
                             "reason": f"url_public_die:{reason}",
                             "httpCode": http_code,
                             "signals": {"urlPublic": attempts, "cookieSource": source},
                         }
-                    elif is_facebook_direct_identity_url(normalized) and (
+                    elif is_facebook_username_identity_url(normalized) and (
                         "auth_wall" in reason.lower()
                         or "unsupported_browser" in reason.lower()
                         or "checkpoint" in reason.lower()
                         or "error" in reason.lower()
                     ):
                         unknown_candidate = unknown_candidate or {
-                            "uid": "",
+                            "uid": signal_uid,
                             "status": "LIVE",
                             "reason": f"url_public_likely_live:{reason}",
                             "httpCode": http_code or 200,
@@ -1875,7 +1970,7 @@ async def check_facebook_url_without_uid(
                         }
                     else:
                         unknown_candidate = unknown_candidate or {
-                            "uid": "",
+                            "uid": signal_uid,
                             "status": "UNKNOWN",
                             "reason": f"url_public_unknown:{reason}",
                             "httpCode": http_code,
@@ -1904,6 +1999,33 @@ def is_unsupported_browser_wall(text: str, final_url: str = "") -> bool:
         or "trinh duyet nay khong duoc ho tro" in low
         or "unsupportedbrowser" in url_low
     )
+
+
+def is_generic_error_page(text: str) -> bool:
+    low = text.lower()
+    return contains_any(low, GENERIC_ERROR_KEYWORDS)
+
+
+def build_public_probe_headers() -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for ua in PUBLIC_PROFILE_USER_AGENTS:
+        key = str(ua or "").strip()
+        if not key:
+            continue
+        low_key = key.lower()
+        if low_key in seen:
+            continue
+        seen.add(low_key)
+        out.append(
+            {
+                "User-Agent": key,
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://m.facebook.com/",
+            }
+        )
+    return out
 
 
 def is_valid_profile_name(raw_name: str) -> bool:
@@ -2052,21 +2174,30 @@ async def probe_public_page(
             final_url = str(resp.url)
             html = await resp.text(errors="ignore")
             html_low = html.lower()
+            signal_uid = extract_uid_from_url(final_url) or extract_uid_from_html(html) or extract_uid_from_url(url)
+            direct_identity = is_facebook_username_identity_url(url)
 
             if code in (404, 410):
-                return {"status": "DIE", "reason": f"{source}_http_{code}", "name": "", "finalUrl": final_url}
+                return {"status": "DIE", "reason": f"{source}_http_{code}", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
             if contains_any(html_low, DIE_KEYWORDS):
-                return {"status": "DIE", "reason": f"{source}_die_keyword", "name": "", "finalUrl": final_url}
+                return {"status": "DIE", "reason": f"{source}_die_keyword", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
             if has_checkpoint_signal(html_low):
-                return {"status": "CHECKPOINT", "reason": f"{source}_checkpoint", "name": "", "finalUrl": final_url}
+                return {"status": "CHECKPOINT", "reason": f"{source}_checkpoint", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
             if is_auth_wall(html_low, final_url):
-                return {"status": "UNKNOWN", "reason": f"{source}_auth_wall", "name": "", "finalUrl": final_url}
+                if direct_identity:
+                    return {"status": "LIVE", "reason": f"{source}_auth_wall_likely_live", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
+                return {"status": "UNKNOWN", "reason": f"{source}_auth_wall", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
             if is_unsupported_browser_wall(html_low, final_url):
-                return {"status": "UNKNOWN", "reason": f"{source}_unsupported_browser", "name": "", "finalUrl": final_url}
+                if direct_identity:
+                    return {"status": "LIVE", "reason": f"{source}_unsupported_browser_likely_live", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
+                return {"status": "UNKNOWN", "reason": f"{source}_unsupported_browser", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
+
+            if direct_identity and is_generic_error_page(html_low):
+                return {"status": "LIVE", "reason": f"{source}_generic_error_likely_live", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
             profile_name = extract_profile_name(html)
             if profile_name:
@@ -2075,16 +2206,18 @@ async def probe_public_page(
                     "reason": f"{source}_profile_name",
                     "name": profile_name,
                     "finalUrl": final_url,
+                    "uid": signal_uid,
+                    "source": source,
                 }
 
             if contains_any(html_low, PROFILE_LIVE_MARKERS):
-                return {"status": "LIVE", "reason": f"{source}_profile_marker", "name": "", "finalUrl": final_url}
+                return {"status": "LIVE", "reason": f"{source}_profile_marker", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
 
-            return {"status": "UNKNOWN", "reason": f"{source}_uncertain", "name": "", "finalUrl": final_url}
+            return {"status": "UNKNOWN", "reason": f"{source}_uncertain", "name": "", "finalUrl": final_url, "uid": signal_uid, "source": source}
     except asyncio.TimeoutError:
-        return {"status": "UNKNOWN", "reason": f"{source}_timeout", "name": "", "finalUrl": ""}
+        return {"status": "UNKNOWN", "reason": f"{source}_timeout", "name": "", "finalUrl": "", "uid": "", "source": source}
     except Exception as err:
-        return {"status": "UNKNOWN", "reason": f"{source}_error:{err}", "name": "", "finalUrl": ""}
+        return {"status": "UNKNOWN", "reason": f"{source}_error:{err}", "name": "", "finalUrl": "", "uid": "", "source": source}
 
 
 def cookie_fingerprint(cookies: Dict[str, str]) -> str:
@@ -2198,46 +2331,82 @@ async def check_uid_once(
     session_cookies: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
-    headers = {
-        # Facebook often returns a generic error page to Android/Desktop public
-        # UAs on Render. iPhone Safari still exposes og:title/profile markers
-        # for public profiles, so try it before cookie fallback.
-        "User-Agent": PUBLIC_PROFILE_USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
-        "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://m.facebook.com/",
-    }
+    header_candidates = build_public_probe_headers()
+    if not header_candidates:
+        header_candidates = [
+            {
+                "User-Agent": PUBLIC_PROFILE_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://m.facebook.com/",
+            }
+        ]
+    primary_headers = dict(header_candidates[0])
 
     mbasic_url = f"https://mbasic.facebook.com/profile.php?id={uid}"
     m_url = f"https://m.facebook.com/profile.php?id={uid}"
     touch_url = f"https://touch.facebook.com/profile.php?id={uid}"
     www_url = f"https://www.facebook.com/profile.php?id={uid}"
+    public_sources: List[Tuple[str, str]] = [
+        ("m", m_url),
+        ("touch", touch_url),
+        ("www", www_url),
+        ("mbasic", mbasic_url),
+    ]
     normalized_session_cookies = normalize_cookies(session_cookies)
 
     async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
-        redirect_task = probe_redirect(uid, session, headers, proxy)
-        graph_task = probe_graph(uid, session, headers, proxy)
-        mbasic_task = probe_public_page("mbasic", mbasic_url, session, headers, proxy)
-        m_task = probe_public_page("m", m_url, session, headers, proxy)
-        touch_task = probe_public_page("touch", touch_url, session, headers, proxy)
-        www_task = probe_public_page("www", www_url, session, headers, proxy)
-
-        redirect_signal, graph_signal, mbasic_signal, m_signal, touch_signal, www_signal = await asyncio.gather(
+        redirect_task = probe_redirect(uid, session, primary_headers, proxy)
+        graph_task = probe_graph(uid, session, primary_headers, proxy)
+        primary_public_tasks = [
+            probe_public_page(source_name, probe_url, session, primary_headers, proxy)
+            for source_name, probe_url in public_sources
+        ]
+        initial_results = await asyncio.gather(
             redirect_task,
             graph_task,
-            mbasic_task,
-            m_task,
-            touch_task,
-            www_task,
+            *primary_public_tasks,
         )
+
+        redirect_signal = initial_results[0]
+        graph_signal = initial_results[1]
+        public_signals: List[Dict[str, str]] = []
+        for item in initial_results[2:]:
+            if isinstance(item, dict):
+                public_signals.append(item)
 
     redirect_state, redirect_reason = redirect_signal
     graph_state, graph_reason = graph_signal
-    public_signals = [m_signal, touch_signal, www_signal, mbasic_signal]
 
     live_public = [item for item in public_signals if item.get("status") == "LIVE"]
     die_public = [item for item in public_signals if item.get("status") == "DIE"]
     checkpoint_public = [item for item in public_signals if item.get("status") == "CHECKPOINT"]
+
+    should_probe_more_headers = (
+        not live_public
+        and not die_public
+        and graph_state != "LIVE"
+        and len(header_candidates) > 1
+    )
+
+    if should_probe_more_headers:
+        timeout_extra = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout_extra, cookies=normalized_session_cookies) as session:
+            extra_tasks = []
+            for header_index, headers in enumerate(header_candidates[1:], start=2):
+                for source_name, probe_url in public_sources:
+                    extra_tasks.append(
+                        probe_public_page(f"{source_name}_h{header_index}", probe_url, session, headers, proxy)
+                    )
+            if extra_tasks:
+                extra_results = await asyncio.gather(*extra_tasks, return_exceptions=True)
+                for item in extra_results:
+                    if isinstance(item, dict):
+                        public_signals.append(item)
+
+        live_public = [item for item in public_signals if item.get("status") == "LIVE"]
+        die_public = [item for item in public_signals if item.get("status") == "DIE"]
+        checkpoint_public = [item for item in public_signals if item.get("status") == "CHECKPOINT"]
 
     status = "UNKNOWN"
     reason = "no_strong_signal"
@@ -2264,6 +2433,46 @@ async def check_uid_once(
         # Redirect-only live is too weak, keep as UNKNOWN to avoid false LIVE.
         status = "UNKNOWN"
         reason = f"redirect_only:{redirect_reason}"
+
+    def signal_rank(item: Dict[str, Any]) -> int:
+        status_value = str(item.get("status") or "").upper()
+        name_value = str(item.get("name") or "").strip()
+        if status_value == "LIVE" and is_valid_profile_name(name_value):
+            return 5
+        if status_value == "LIVE":
+            return 4
+        if status_value == "CHECKPOINT":
+            return 3
+        if status_value == "DIE":
+            return 2
+        return 1
+
+    def pick_signal_for_source(source_prefix: str) -> Dict[str, Any]:
+        best_signal: Optional[Dict[str, Any]] = None
+        best_rank = -1
+        for item in public_signals:
+            item_source = str(item.get("source") or "")
+            if not item_source.startswith(source_prefix):
+                continue
+            rank = signal_rank(item)
+            if rank > best_rank:
+                best_rank = rank
+                best_signal = item
+        if best_signal is not None:
+            return best_signal
+        return {
+            "status": "UNKNOWN",
+            "reason": f"{source_prefix}_missing",
+            "name": "",
+            "finalUrl": "",
+            "uid": "",
+            "source": source_prefix,
+        }
+
+    m_signal = pick_signal_for_source("m")
+    touch_signal = pick_signal_for_source("touch")
+    www_signal = pick_signal_for_source("www")
+    mbasic_signal = pick_signal_for_source("mbasic")
 
     return {
         "uid": uid,
@@ -2646,6 +2855,19 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
 
     request_pool = req.cookiesPool or req.cookies_pool
     result = await check_uid(uid, req.proxy, req.cookies, request_pool)
+    result_status = str(result.get("status") or "").upper()
+    raw_url_is_facebook = bool(raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()))
+    if raw_url_is_facebook and result_status in {"UNKNOWN", "CHECKPOINT", "DIE"}:
+        url_fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
+        fallback_status = str(url_fallback.get("status") or "").upper()
+        if fallback_status == "LIVE":
+            url_fallback["uid"] = normalize_uid(url_fallback.get("uid")) or uid
+            url_fallback["ok"] = True
+            return url_fallback
+        if result_status == "DIE" and is_facebook_username_identity_url(raw_url) and fallback_status == "UNKNOWN":
+            result["status"] = "UNKNOWN"
+            result["reason"] = f"uid_dead_rechecked_unknown:{result.get('reason', '-')}"
+
     result["ok"] = True
     return result
 
