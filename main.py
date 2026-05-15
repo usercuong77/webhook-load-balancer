@@ -139,6 +139,7 @@ LEAD_SCRIPT_URLS = _parse_urls(os.getenv("LEAD_SCRIPT_URLS", ""))
 SEPAY_SCRIPT_URLS = _parse_urls(os.getenv("SEPAY_SCRIPT_URLS", ""))
 SEPAY_FAILOVER_ENABLED = _env_bool("SEPAY_FAILOVER_ENABLED", False)
 REQUEST_TIMEOUT_SEC = max(5, _env_int("REQUEST_TIMEOUT_SEC", 25))
+TELEGRAM_FORWARD_TIMEOUT_SEC = max(REQUEST_TIMEOUT_SEC, _env_int("TELEGRAM_FORWARD_TIMEOUT_SEC", 75))
 WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
 UID_CHECKER_ENABLED = _env_bool("UID_CHECKER_ENABLED", True)
 UID_CHECKER_API_KEY = (
@@ -387,14 +388,20 @@ def _forward_headers() -> Dict[str, str]:
     return headers
 
 
-def _post_json(url: str, payload: Dict, source: str, extra_params: Optional[Dict[str, str]] = None) -> requests.Response:
+def _post_json(
+    url: str,
+    payload: Dict,
+    source: str,
+    extra_params: Optional[Dict[str, str]] = None,
+    timeout_sec: Optional[int] = None,
+) -> requests.Response:
     target = _with_source(url, source)
     target = _append_query_params(target, extra_params or {})
     return requests.post(
         target,
         json=payload,
         headers=_forward_headers(),
-        timeout=REQUEST_TIMEOUT_SEC,
+        timeout=timeout_sec or REQUEST_TIMEOUT_SEC,
     )
 
 
@@ -626,7 +633,7 @@ def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = 
     target_url = urls[0]
     params = forward_params or {}
     try:
-        resp = _post_json(target_url, payload, "telegram", params)
+        resp = _post_json(target_url, payload, "telegram", params, TELEGRAM_FORWARD_TIMEOUT_SEC)
         body_text = (resp.text or "")[:1200]
         return (
             200 <= int(resp.status_code) < 300,
