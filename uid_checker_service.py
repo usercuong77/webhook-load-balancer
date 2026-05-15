@@ -2378,7 +2378,10 @@ async def telegram_webhook_relay(request: Request) -> Response:
 async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, Any]:
     ensure_api_key(x_api_key)
 
-    uid = normalize_uid(req.uid) or extract_uid_from_url(req.url)
+    raw_url = str(req.url or "").strip()
+    uid = normalize_uid(req.uid) or extract_uid_from_url(raw_url)
+    if not uid and raw_url:
+        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy)
     if not uid:
         return {
             "uid": "",

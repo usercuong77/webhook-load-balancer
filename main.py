@@ -205,7 +205,7 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-DEBUG_LOG_VERSION = "step34_split_queue_status_alerts_2026-05-15"
+DEBUG_LOG_VERSION = "step35_share_url_uid_resolve_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -1315,15 +1315,27 @@ def _checker_cache_get(cache_key: str) -> Optional[Dict]:
         return dict(item)
 
 
-def _checker_cache_set(cache_key: str, response: Response, ttl_seconds: int) -> None:
+def _checker_cache_set(cache_key: str, response: Response, ttl_seconds: int, namespace: str = "") -> None:
     if not CHECKER_CACHE_ENABLED or not cache_key or ttl_seconds <= 0:
         return
     status_code = int(response.status_code or 200)
-    if status_code >= 500:
+    if status_code >= 400:
         return
     body = response.get_data(as_text=True)
     if len(body) > 250000:
         return
+    try:
+        parsed_body = json.loads(body) if body else {}
+    except Exception:
+        parsed_body = {}
+    if isinstance(parsed_body, dict):
+        reason = str(parsed_body.get("reason") or parsed_body.get("error") or parsed_body.get("detail") or "").strip().lower()
+        method = str(parsed_body.get("method") or "").strip().lower()
+        status = str(parsed_body.get("status") or "").strip().lower()
+        if reason in {"invalid_uid", "latest_post_timeout"} or method == "latest_post_timeout":
+            return
+        if namespace.startswith("check") and status == "unknown" and reason:
+            return
     content_type = str(response.content_type or "application/json")
     now = time.time()
     with CHECKER_CACHE_LOCK:
@@ -1378,7 +1390,7 @@ def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_fact
     if cached:
         return _checker_cached_response(cached)
     response = _call_checker(coro_factory)
-    _checker_cache_set(cache_key, response, ttl_seconds)
+    _checker_cache_set(cache_key, response, ttl_seconds, namespace)
     if cache_key:
         response.headers["X-Checker-Cache"] = "MISS"
     return response
