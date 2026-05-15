@@ -1528,13 +1528,15 @@ def _resolve_checker_batch_payload_uid(payload_raw: Dict) -> Dict:
     return payload
 
 
-def _checker_batch_items() -> Tuple[List, Optional[Response]]:
-    body = _checker_payload()
+def _checker_batch_items() -> Tuple[List, Dict, Optional[Response]]:
+    body = _payload_dict()
+    if not isinstance(body, dict):
+        return [], {}, (jsonify({"ok": False, "error": "invalid_body"}), 400)
     items = body.get("items") if isinstance(body, dict) else []
     if not isinstance(items, list):
-        return [], (jsonify({"ok": False, "error": "invalid_items"}), 400)
+        return [], {}, (jsonify({"ok": False, "error": "invalid_items"}), 400)
     if len(items) > CHECKER_BATCH_MAX_ITEMS:
-        return [], (
+        return [], {}, (
             jsonify({
                 "ok": False,
                 "error": "too_many_items",
@@ -1543,7 +1545,12 @@ def _checker_batch_items() -> Tuple[List, Optional[Response]]:
             }),
             413,
         )
-    return items, None
+    shared_payload: Dict = {}
+    for key in ("proxy", "cookies", "cookiesPool", "cookies_pool"):
+        value = body.get(key)
+        if value not in (None, ""):
+            shared_payload[key] = value
+    return items, shared_payload, None
 
 
 def _run_checker_cached_json(namespace: str, payload: Dict, ttl_seconds: int, coro_factory) -> Dict:
@@ -1565,7 +1572,7 @@ def _checker_batch_response(kind: str, ttl_seconds: int, runner) -> Response:
     if auth_error:
         return auth_error
 
-    items, error_response = _checker_batch_items()
+    items, shared_payload, error_response = _checker_batch_items()
     if error_response:
         return error_response
 
@@ -1576,6 +1583,10 @@ def _checker_batch_response(kind: str, ttl_seconds: int, runner) -> Response:
     cache_hits = 0
     for index, item_raw in enumerate(items):
         payload, item_id, raw_input = _normalize_checker_batch_payload(item_raw)
+        for key, value in shared_payload.items():
+            current = payload.get(key)
+            if current in (None, "", {}, []):
+                payload[key] = value
         payload = _resolve_checker_batch_payload_uid(payload)
         try:
             result = _run_checker_cached_json(
