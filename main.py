@@ -216,8 +216,8 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-CHECKER_CACHE_VERSION = "step49_viplike_no_cookie_fix_v1"
-DEBUG_LOG_VERSION = "step49_viplike_no_cookie_fix_v1_2026-05-15"
+CHECKER_CACHE_VERSION = "step50_viplike_lock_cleanup_v1"
+DEBUG_LOG_VERSION = "step50_viplike_lock_cleanup_v1_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
@@ -637,6 +637,64 @@ def _send_telegram_loading_message(payload: Dict, bot_hint: str) -> Dict:
         return {"ok": False, "error": str(exc)}
 
 
+def _delete_telegram_loading_message(payload: Dict, forward_params: Optional[Dict[str, str]] = None, reason: str = "") -> Dict:
+    params = forward_params or {}
+    raw_message_id = params.get("loading_message_id") if isinstance(params, dict) else ""
+    try:
+        message_id = int(str(raw_message_id or "0").strip() or "0")
+    except Exception:
+        message_id = 0
+    if message_id <= 0:
+        return {"ok": False, "skipped": True, "reason": "loading_message_missing"}
+
+    chat_id, _ = _telegram_text_message_target(payload)
+    if not chat_id:
+        return {"ok": False, "skipped": True, "reason": "chat_missing"}
+
+    bot_hint = str((params or {}).get("bot") or "").strip().lower()
+    token = _telegram_bot_token_for_hint(bot_hint)
+    if not token:
+        return {"ok": False, "skipped": True, "reason": "telegram_token_missing"}
+
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=TELEGRAM_LOADING_TIMEOUT_SEC,
+        )
+        body = {}
+        try:
+            body = resp.json() if resp.text else {}
+        except Exception:
+            body = {}
+        ok = bool(isinstance(body, dict) and body.get("ok") is True and 200 <= int(resp.status_code) < 300)
+        if not ok:
+            _log_event(
+                "warning",
+                "telegram_loading",
+                "Render failed to delete loading message",
+                code="telegram_loading_delete_failed",
+                reason=reason or "unknown",
+                chat_id=chat_id,
+                message_id=message_id,
+                http=int(resp.status_code),
+                body=body if isinstance(body, dict) else str(resp.text or "")[:300],
+            )
+        return {"ok": ok, "http": int(resp.status_code), "body": body}
+    except Exception as exc:
+        _log_event(
+            "warning",
+            "telegram_loading",
+            "Render loading delete exception",
+            code="telegram_loading_delete_exception",
+            reason=reason or "unknown",
+            chat_id=chat_id,
+            message_id=message_id,
+            error=str(exc),
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def _forward_telegram(payload: Dict, forward_params: Optional[Dict[str, str]] = None) -> Tuple[bool, List[Dict]]:
     urls = _ordered_urls(_telegram_backends(), payload, "telegram")
     if not urls:
@@ -680,6 +738,7 @@ def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) 
     try:
         ok, attempts = _forward_telegram(payload, forward_params)
         if not ok:
+            _delete_telegram_loading_message(payload, forward_params, "async_forward_failed")
             _log_event(
                 "error",
                 "telegram_retry",
@@ -688,6 +747,7 @@ def _forward_telegram_background(payload: Dict, forward_params: Dict[str, str]) 
                 attempts=attempts,
             )
     except Exception as exc:
+        _delete_telegram_loading_message(payload, forward_params, "async_forward_crashed")
         _log_event(
             "error",
             "telegram_retry",
@@ -1047,6 +1107,11 @@ def _telegram_heavy_queue_worker(worker_id: int) -> None:
             if ok:
                 _telegram_queue_metric({"processed": 1}, last_processed_at=_telegram_queue_now_iso(), last_error="")
             else:
+                _delete_telegram_loading_message(
+                    job.get("payload", {}),
+                    job.get("forward_params", {}),
+                    "heavy_queue_forward_failed",
+                )
                 _telegram_queue_metric(
                     {"processed": 1, "failed": 1},
                     last_processed_at=_telegram_queue_now_iso(),
@@ -1064,6 +1129,11 @@ def _telegram_heavy_queue_worker(worker_id: int) -> None:
                     attempts=attempts,
                 )
         except Exception as exc:
+            _delete_telegram_loading_message(
+                job.get("payload", {}),
+                job.get("forward_params", {}),
+                "heavy_queue_worker_exception",
+            )
             _telegram_queue_metric(
                 {"processed": 1, "failed": 1},
                 last_processed_at=_telegram_queue_now_iso(),
