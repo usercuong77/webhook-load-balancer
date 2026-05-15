@@ -118,8 +118,18 @@ PROFILE_NAME_BLOCKLIST = [
     "log in",
     "login",
     "sign up",
+    "home",
+    "profile",
+    "messages",
+    "notifications",
+    "chat",
+    "friends",
+    "groups",
+    "menu",
+    "logout",
     "sorry, something went wrong",
     "something went wrong",
+    "not available on this browser",
     "browser is not supported",
     "browser not supported",
     "unsupported browser",
@@ -1723,6 +1733,18 @@ def is_auth_wall(text: str, final_url: str = "") -> bool:
     )
 
 
+def is_unsupported_browser_wall(text: str, final_url: str = "") -> bool:
+    low = text.lower()
+    url_low = (final_url or "").lower()
+    return (
+        "not available on this browser" in low
+        or "browser is not supported" in low
+        or "unsupported browser" in low
+        or "trinh duyet nay khong duoc ho tro" in low
+        or "unsupportedbrowser" in url_low
+    )
+
+
 def is_valid_profile_name(raw_name: str) -> bool:
     name = re.sub(r"\s+", " ", str(raw_name or "")).strip()
     if len(name) < 2 or len(name) > 80:
@@ -1732,7 +1754,7 @@ def is_valid_profile_name(raw_name: str) -> bool:
     if contains_any(low, PROFILE_NAME_BLOCKLIST):
         return False
 
-    if re.search(r"(sorry|browser|unsupported|login|sign up)", low):
+    if re.search(r"(sorry|browser|unsupported|login|sign up|notification|message|friend|logout)", low):
         return False
 
     return bool(re.search(r"[A-Za-zÀ-ỹ]", name))
@@ -1882,6 +1904,9 @@ async def probe_public_page(
             if is_auth_wall(html_low, final_url):
                 return {"status": "UNKNOWN", "reason": f"{source}_auth_wall", "name": "", "finalUrl": final_url}
 
+            if is_unsupported_browser_wall(html_low, final_url):
+                return {"status": "UNKNOWN", "reason": f"{source}_unsupported_browser", "name": "", "finalUrl": final_url}
+
             profile_name = extract_profile_name(html)
             if profile_name:
                 return {
@@ -1941,7 +1966,7 @@ def build_cookie_candidates(
         seen.add(fingerprint)
         candidates.append({"source": source, "cookies": candidate_cookies})
 
-    if not candidates:
+    if not any(str(item.get("source")) == "no_cookie" for item in candidates):
         candidates.append({"source": "no_cookie", "cookies": {}})
     return candidates
 
@@ -1950,8 +1975,6 @@ def should_try_next_cookie(result: Dict[str, Any]) -> bool:
     status = str(result.get("status", "")).upper()
     if status == "CHECKPOINT":
         return True
-    if status != "UNKNOWN":
-        return False
 
     def has_cookie_failure_reason(reason_raw: Any) -> bool:
         reason = str(reason_raw or "").lower()
@@ -1962,7 +1985,16 @@ def should_try_next_cookie(result: Dict[str, Any]) -> bool:
             or "checkpoint" in reason
             or "login" in reason
             or "security" in reason
+            or "unsupported_browser" in reason
+            or "browser" in reason
+            or "no_strong_signal" in reason
         )
+
+    if status == "LIVE":
+        return not result_has_profile_name(result)
+
+    if status != "UNKNOWN":
+        return False
 
     if has_cookie_failure_reason(result.get("reason")):
         return True
@@ -1977,6 +2009,26 @@ def should_try_next_cookie(result: Dict[str, Any]) -> bool:
             return True
 
     return False
+
+
+def pick_profile_name_from_result(result: Dict[str, Any]) -> str:
+    signals = result.get("signals")
+    if not isinstance(signals, dict):
+        return ""
+
+    for key in ("m", "touch", "mbasic"):
+        signal = signals.get(key)
+        if not isinstance(signal, dict):
+            continue
+        status = str(signal.get("status") or "").strip().upper()
+        name = str(signal.get("name") or "").strip()
+        if status in {"LIVE", "OK", ""} and is_valid_profile_name(name):
+            return re.sub(r"\s+", " ", name).strip()
+    return ""
+
+
+def result_has_profile_name(result: Dict[str, Any]) -> bool:
+    return bool(pick_profile_name_from_result(result))
 
 
 async def check_uid_once(
@@ -2072,6 +2124,7 @@ async def check_uid(
     candidates = build_cookie_candidates(cookies, cookies_pool)
     attempts: List[Dict[str, Any]] = []
     final_result: Optional[Dict[str, Any]] = None
+    best_live_result: Optional[Dict[str, Any]] = None
 
     for idx, candidate in enumerate(candidates):
         candidate_cookies = candidate.get("cookies") if isinstance(candidate, dict) else {}
@@ -2096,10 +2149,21 @@ async def check_uid(
         final_result = current
 
         has_next = idx < (len(candidates) - 1)
+        if str(current.get("status", "")).upper() == "LIVE":
+            if best_live_result is None or result_has_profile_name(current):
+                best_live_result = current
+            if result_has_profile_name(current):
+                break
+            if has_next:
+                continue
+
         if not has_next:
             break
         if not should_try_next_cookie(current):
             break
+
+    if best_live_result is not None:
+        final_result = best_live_result
 
     if not final_result:
         final_result = await check_uid_once(uid=uid, proxy=proxy, session_cookies={})
@@ -2108,6 +2172,9 @@ async def check_uid(
     if isinstance(final_signals, dict):
         final_signals["cookieFallbackUsed"] = len(attempts) > 1
         final_signals["cookieAttempts"] = attempts
+    profile_name = pick_profile_name_from_result(final_result)
+    if profile_name:
+        final_result["profileName"] = profile_name
 
     return final_result
 
