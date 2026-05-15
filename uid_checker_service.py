@@ -1258,11 +1258,14 @@ def build_facebook_latest_post_probe_urls(uid: str) -> List[str]:
         return []
 
     urls = [
+        f"https://m.facebook.com/profile.php?id={normalized_uid}&v=timeline",
+        f"https://touch.facebook.com/profile.php?id={normalized_uid}&v=timeline",
+        f"https://mbasic.facebook.com/profile.php?id={normalized_uid}&v=timeline",
+        f"https://m.facebook.com/{normalized_uid}?v=timeline",
+        f"https://touch.facebook.com/{normalized_uid}?v=timeline",
         f"https://www.facebook.com/profile.php?id={normalized_uid}&sk=posts",
         f"https://www.facebook.com/profile.php?id={normalized_uid}",
         f"https://www.facebook.com/{normalized_uid}",
-        f"https://m.facebook.com/profile.php?id={normalized_uid}&v=timeline",
-        f"https://mbasic.facebook.com/profile.php?id={normalized_uid}&v=timeline",
     ]
 
     out: List[str] = []
@@ -1547,79 +1550,108 @@ async def fetch_latest_facebook_post_once(
         "Upgrade-Insecure-Requests": "1",
     }
     probe_urls = build_facebook_latest_post_probe_urls(normalized_uid)
+    if not normalized_session_cookies and probe_urls:
+        def _probe_rank(url_raw: Any) -> int:
+            url = str(url_raw or "").lower()
+            if "m.facebook.com" in url:
+                return 0
+            if "touch.facebook.com" in url:
+                return 1
+            if "mbasic.facebook.com" in url:
+                return 2
+            if "sk=posts" in url:
+                return 3
+            return 4
+        probe_urls = sorted(probe_urls, key=_probe_rank)
     attempts: List[Dict[str, Any]] = []
-    max_attempts = 4 if normalized_session_cookies else 3
+    max_attempts = 5 if normalized_session_cookies else max(5, min(7, len(probe_urls) + 1))
     attempts_made = 0
 
-    async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
+    plan: List[Tuple[str, str]] = []
+    if normalized_session_cookies:
+        ua_primary = user_agents[:2] if len(user_agents) > 1 else user_agents
         for probe_url in probe_urls:
+            for ua in ua_primary:
+                plan.append((probe_url, ua))
+    else:
+        primary_ua = user_agents[0] if user_agents else PUBLIC_PROFILE_USER_AGENT
+        for probe_url in probe_urls:
+            plan.append((probe_url, primary_ua))
+        # Add one secondary UA retry for first 2 mobile probes only.
+        if len(user_agents) > 1:
+            secondary_ua = user_agents[1]
+            for probe_url in probe_urls[:2]:
+                plan.append((probe_url, secondary_ua))
+
+    if len(plan) > max_attempts:
+        plan = plan[:max_attempts]
+
+    async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
+        for probe_url, user_agent in plan:
             if attempts_made >= max_attempts:
                 break
-            for user_agent in user_agents:
-                if attempts_made >= max_attempts:
-                    break
-                headers = dict(headers_base)
-                headers["User-Agent"] = user_agent
-                headers.update(build_facebook_navigation_hint_headers(user_agent))
-                try:
-                    attempts_made += 1
-                    async with session.get(
-                        probe_url,
-                        headers=headers,
-                        proxy=proxy,
-                        allow_redirects=True,
-                    ) as resp:
-                        http_code = int(resp.status or 0)
-                        body = await resp.text(errors="ignore")
-                        final_url = str(resp.url)
-                        parsed = parse_latest_post_from_html(body)
-                        has_post_candidate = bool(parsed and is_latest_post_id_token(parsed.get("postId")))
-                        has_evidence = has_post_candidate and has_latest_post_evidence_in_html(body, parsed.get("postId"))
-                        http_success = 200 <= http_code < 400
+            headers = dict(headers_base)
+            headers["User-Agent"] = user_agent
+            headers.update(build_facebook_navigation_hint_headers(user_agent))
+            try:
+                attempts_made += 1
+                async with session.get(
+                    probe_url,
+                    headers=headers,
+                    proxy=proxy,
+                    allow_redirects=True,
+                ) as resp:
+                    http_code = int(resp.status or 0)
+                    body = await resp.text(errors="ignore")
+                    final_url = str(resp.url)
+                    parsed = parse_latest_post_from_html(body)
+                    has_post_candidate = bool(parsed and is_latest_post_id_token(parsed.get("postId")))
+                    has_evidence = has_post_candidate and has_latest_post_evidence_in_html(body, parsed.get("postId"))
+                    http_success = 200 <= http_code < 400
 
-                        if has_post_candidate and has_evidence and http_success:
-                            post_content = extract_latest_post_content_from_html(body, parsed["postId"])
-                            return {
-                                "ok": True,
-                                "uid": normalized_uid,
-                                "postId": parsed["postId"],
-                                "timestamp": parsed["timestamp"],
-                                "link": build_latest_post_link(normalized_uid, parsed["postId"]),
-                                "content": post_content,
-                                "postContent": post_content,
-                                "method": "with_cookie" if normalized_session_cookies else "no_cookie",
-                                "reason": "ok",
-                                "httpCode": http_code,
-                                "probeUrl": probe_url,
-                                "finalUrl": final_url,
-                                "probeAttempts": attempts + [
-                                    {
-                                        "url": probe_url,
-                                        "httpCode": http_code,
-                                        "reason": "ok",
-                                    }
-                                ],
-                            }
-                        fail_reason = build_latest_post_failure_reason(body, final_url, http_code)
-                        if has_post_candidate and not has_evidence and http_success:
-                            fail_reason = f"latest_post_candidate_untrusted_http_{http_code or 0}"
-                        attempts.append(
-                            {
-                                "url": probe_url,
-                                "httpCode": http_code,
-                                "reason": fail_reason,
-                                "finalUrl": final_url,
-                            }
-                        )
-                except Exception as err:
+                    if has_post_candidate and has_evidence and http_success:
+                        post_content = extract_latest_post_content_from_html(body, parsed["postId"])
+                        return {
+                            "ok": True,
+                            "uid": normalized_uid,
+                            "postId": parsed["postId"],
+                            "timestamp": parsed["timestamp"],
+                            "link": build_latest_post_link(normalized_uid, parsed["postId"]),
+                            "content": post_content,
+                            "postContent": post_content,
+                            "method": "with_cookie" if normalized_session_cookies else "no_cookie",
+                            "reason": "ok",
+                            "httpCode": http_code,
+                            "probeUrl": probe_url,
+                            "finalUrl": final_url,
+                            "probeAttempts": attempts + [
+                                {
+                                    "url": probe_url,
+                                    "httpCode": http_code,
+                                    "reason": "ok",
+                                }
+                            ],
+                        }
+                    fail_reason = build_latest_post_failure_reason(body, final_url, http_code)
+                    if has_post_candidate and not has_evidence and http_success:
+                        fail_reason = f"latest_post_candidate_untrusted_http_{http_code or 0}"
                     attempts.append(
                         {
                             "url": probe_url,
-                            "httpCode": 0,
-                            "reason": f"exception:{err}",
-                            "finalUrl": "",
+                            "httpCode": http_code,
+                            "reason": fail_reason,
+                            "finalUrl": final_url,
                         }
                     )
+            except Exception as err:
+                attempts.append(
+                    {
+                        "url": probe_url,
+                        "httpCode": 0,
+                        "reason": f"exception:{err}",
+                        "finalUrl": "",
+                    }
+                )
 
     selected_failure = choose_best_latest_post_failure(
         attempts,
@@ -1668,12 +1700,11 @@ def should_try_cookie_fallback_for_latest_post(result_raw: Any) -> bool:
     if reason.startswith("latest_post_timeout"):
         return True
     if reason.startswith("latest_post_not_found"):
-        if http_code in (429, 500, 502, 503, 504, 0):
+        if http_code in (200, 429, 500, 502, 503, 504, 0):
             return True
-        # No-cookie produced deterministic "no post" signals -> skip cookie to keep response fast.
         return False
     if reason.startswith("timeline_shell_no_post_data"):
-        return False
+        return True
     return False
 
 
