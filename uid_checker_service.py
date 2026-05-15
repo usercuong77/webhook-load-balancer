@@ -147,6 +147,12 @@ PROFILE_NAME_BLOCKLIST = [
     "meta",
 ]
 
+PUBLIC_PROFILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+    "Version/17.0 Mobile/15E148 Safari/604.1"
+)
+
 UID_SCRAPE_PATTERNS = [
     r'"userID"\s*:\s*"(\d{8,20})"',
     r'"profile_id"\s*:\s*(\d{8,20})',
@@ -1628,8 +1634,9 @@ async def get_latest_facebook_post(
 
 
 FALLBACK_UID_PROBE_USER_AGENTS = [
-    "Mozilla/5.0",
+    PUBLIC_PROFILE_USER_AGENT,
     "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Mozilla/5.0",
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -2003,7 +2010,7 @@ def should_try_next_cookie(result: Dict[str, Any]) -> bool:
     if not isinstance(signals, dict):
         return False
 
-    for key in ("redirect", "graph", "mbasic", "m", "touch"):
+    for key in ("redirect", "graph", "mbasic", "m", "touch", "www"):
         signal = signals.get(key)
         if isinstance(signal, dict) and has_cookie_failure_reason(signal.get("reason")):
             return True
@@ -2016,7 +2023,7 @@ def pick_profile_name_from_result(result: Dict[str, Any]) -> str:
     if not isinstance(signals, dict):
         return ""
 
-    for key in ("m", "touch", "mbasic"):
+    for key in ("m", "touch", "www", "mbasic"):
         signal = signals.get(key)
         if not isinstance(signal, dict):
             continue
@@ -2038,19 +2045,19 @@ async def check_uid_once(
 ) -> Dict[str, Any]:
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Linux; Android 10; Mobile) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/121.0 Mobile Safari/537.36"
-        ),
+        # Facebook often returns a generic error page to Android/Desktop public
+        # UAs on Render. iPhone Safari still exposes og:title/profile markers
+        # for public profiles, so try it before cookie fallback.
+        "User-Agent": PUBLIC_PROFILE_USER_AGENT,
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://mbasic.facebook.com/",
+        "Referer": "https://m.facebook.com/",
     }
 
     mbasic_url = f"https://mbasic.facebook.com/profile.php?id={uid}"
     m_url = f"https://m.facebook.com/profile.php?id={uid}"
     touch_url = f"https://touch.facebook.com/profile.php?id={uid}"
+    www_url = f"https://www.facebook.com/profile.php?id={uid}"
     normalized_session_cookies = normalize_cookies(session_cookies)
 
     async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
@@ -2059,18 +2066,20 @@ async def check_uid_once(
         mbasic_task = probe_public_page("mbasic", mbasic_url, session, headers, proxy)
         m_task = probe_public_page("m", m_url, session, headers, proxy)
         touch_task = probe_public_page("touch", touch_url, session, headers, proxy)
+        www_task = probe_public_page("www", www_url, session, headers, proxy)
 
-        redirect_signal, graph_signal, mbasic_signal, m_signal, touch_signal = await asyncio.gather(
+        redirect_signal, graph_signal, mbasic_signal, m_signal, touch_signal, www_signal = await asyncio.gather(
             redirect_task,
             graph_task,
             mbasic_task,
             m_task,
             touch_task,
+            www_task,
         )
 
     redirect_state, redirect_reason = redirect_signal
     graph_state, graph_reason = graph_signal
-    public_signals = [mbasic_signal, m_signal, touch_signal]
+    public_signals = [m_signal, touch_signal, www_signal, mbasic_signal]
 
     live_public = [item for item in public_signals if item.get("status") == "LIVE"]
     die_public = [item for item in public_signals if item.get("status") == "DIE"]
@@ -2113,6 +2122,7 @@ async def check_uid_once(
             "mbasic": mbasic_signal,
             "m": m_signal,
             "touch": touch_signal,
+            "www": www_signal,
             "cookieMode": "on" if normalized_session_cookies else "off",
             "cookieCount": len(normalized_session_cookies),
         },
