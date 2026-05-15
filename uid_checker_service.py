@@ -1967,7 +1967,7 @@ def build_cookie_candidates(
         candidates.append({"source": source, "cookies": candidate_cookies})
 
     if not any(str(item.get("source")) == "no_cookie" for item in candidates):
-        candidates.append({"source": "no_cookie", "cookies": {}})
+        candidates.insert(0, {"source": "no_cookie", "cookies": {}})
     return candidates
 
 
@@ -2038,7 +2038,11 @@ async def check_uid_once(
 ) -> Dict[str, Any]:
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
     headers = {
-        "User-Agent": pick_user_agent(),
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 10; Mobile) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/121.0 Mobile Safari/537.36"
+        ),
         "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
         "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://mbasic.facebook.com/",
