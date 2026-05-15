@@ -37,7 +37,7 @@ except Exception:
 APP_NAME = "uid-checker-service"
 API_KEY = os.getenv("UID_CHECKER_API_KEY", "").strip()
 HTTP_TIMEOUT_SECONDS = float(os.getenv("UID_CHECKER_TIMEOUT", "10"))
-LATEST_POST_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LATEST_POST_TOTAL_TIMEOUT", "15"))
+LATEST_POST_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LATEST_POST_TOTAL_TIMEOUT", "25"))
 CHECK_UID_ENABLE_EXTRA_HEADERS = str(os.getenv("CHECK_UID_ENABLE_EXTRA_HEADERS", "0")).strip().lower() in {
     "1",
     "true",
@@ -260,7 +260,7 @@ def get_latest_post_total_timeout_seconds() -> float:
         value = float(raw)
     except Exception:
         value = LATEST_POST_TOTAL_TIMEOUT_SECONDS
-    return max(5.0, value)
+    return max(25.0, value)
 
 
 def get_latest_post_uid_resolve_timeout_seconds() -> float:
