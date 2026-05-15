@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from queue import Empty, Full, Queue
 import threading
 import time
