@@ -1958,6 +1958,49 @@ def is_facebook_username_identity_url(url_raw: Any) -> bool:
         return False
 
 
+def extract_facebook_username_slug(url_raw: Any) -> str:
+    normalized = normalize_url_input(url_raw)
+    if not normalized:
+        return ""
+    try:
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" not in host and "fb.com" not in host:
+            return ""
+        path = (parsed.path or "/").strip("/")
+        parts = [part for part in path.split("/") if part]
+        if len(parts) != 1:
+            return ""
+        slug = parts[0].strip()
+        low = slug.lower()
+        reserved = {
+            "profile.php",
+            "people",
+            "share",
+            "photo",
+            "photos",
+            "posts",
+            "permalink.php",
+            "story.php",
+            "watch",
+            "reel",
+            "reels",
+            "groups",
+            "pages",
+            "events",
+            "marketplace",
+            "login",
+            "recover",
+        }
+        if not slug or low in reserved:
+            return ""
+        if re.fullmatch(r"\d{8,20}", slug):
+            return ""
+        return slug
+    except Exception:
+        return ""
+
+
 def build_facebook_public_check_urls(url_raw: Any) -> List[str]:
     normalized = normalize_url_input(url_raw)
     if not normalized:
@@ -3107,6 +3150,10 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
                     )
                     if is_valid_profile_name(enriched):
                         url_fallback["profileName"] = enriched
+            if not is_valid_profile_name(str(url_fallback.get("profileName") or "").strip()):
+                slug_name = extract_facebook_username_slug(raw_url)
+                if slug_name:
+                    url_fallback["profileName"] = slug_name
             url_fallback["ok"] = True
             return url_fallback
         if result_status == "DIE" and is_facebook_username_identity_url(raw_url) and fallback_status == "UNKNOWN":
@@ -3124,6 +3171,10 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
             )
             if is_valid_profile_name(enriched_name):
                 result["profileName"] = enriched_name
+        if not is_valid_profile_name(str(result.get("profileName") or "").strip()):
+            slug_name = extract_facebook_username_slug(raw_url)
+            if slug_name:
+                result["profileName"] = slug_name
 
     result["ok"] = True
     return result
