@@ -172,9 +172,17 @@ TELEGRAM_HEAVY_QUEUE_NON_COMMANDS = _env_bool("TELEGRAM_HEAVY_QUEUE_NON_COMMANDS
 TELEGRAM_HEAVY_COMMANDS = _parse_csv_set(
     os.getenv(
         "TELEGRAM_HEAVY_COMMANDS",
-        "/check,/add,/addpost,/checkpost,/viplike,/viplikeoff,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
+        "/check,/add,/addpost,/checkpost,/lammoiviplike,/lamoi,/refreshviplike,/capnhatmenu,/accgg",
     )
 )
+TELEGRAM_HEAVY_EXCLUDE_COMMANDS = _parse_csv_set(
+    os.getenv("TELEGRAM_HEAVY_EXCLUDE_COMMANDS", "/viplike,/viplikeoff")
+)
+if not _env_bool("TELEGRAM_HEAVY_INCLUDE_VIPLIKE", False):
+    TELEGRAM_HEAVY_COMMANDS.discard("/viplike")
+    TELEGRAM_HEAVY_COMMANDS.discard("/viplikeoff")
+for _excluded_heavy_cmd in TELEGRAM_HEAVY_EXCLUDE_COMMANDS:
+    TELEGRAM_HEAVY_COMMANDS.discard(_excluded_heavy_cmd)
 TELEGRAM_DURABLE_QUEUE_ENABLED = _env_bool("TELEGRAM_DURABLE_QUEUE_ENABLED", True)
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
@@ -564,6 +572,9 @@ def _is_heavy_telegram_update(payload: Dict) -> bool:
     command = _telegram_command_from_payload(payload)
     if command:
         return command in TELEGRAM_HEAVY_COMMANDS
+    # Keep interactive numeric replies (e.g. VIPLIKE quantity) off heavy queue.
+    if re.fullmatch(r"\d{1,8}", text.strip()):
+        return False
     return TELEGRAM_HEAVY_QUEUE_NON_COMMANDS
 
 
@@ -1448,6 +1459,32 @@ def _call_checker(coro_factory) -> Response:
         return _checker_exception_response(exc)
 
 
+def _checker_should_cache_response(namespace: str, response: Response) -> bool:
+    try:
+        status_code = int(getattr(response, "status_code", 500) or 500)
+    except Exception:
+        status_code = 500
+    if status_code >= 400:
+        return False
+
+    if namespace != "latest_post":
+        return True
+
+    try:
+        payload = _checker_response_json(response)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+
+    if bool(payload.get("ok")) and str(payload.get("postId") or "").strip():
+        return True
+
+    # latest-post negatives are often transient (auth wall / timeout / uid resolve race),
+    # avoid caching them to improve subsequent immediate retries.
+    return False
+
+
 def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_factory) -> Response:
     cache_source = {
         "payload": key_source,
@@ -1459,7 +1496,7 @@ def _call_checker_cached(namespace: str, key_source, ttl_seconds: int, coro_fact
     if cached:
         return _checker_cached_response(cached)
     response = _call_checker(coro_factory)
-    if int(getattr(response, "status_code", 500) or 500) < 400:
+    if _checker_should_cache_response(namespace, response):
         _checker_cache_set(cache_key, response, ttl_seconds, namespace)
     if cache_key:
         response.headers["X-Checker-Cache"] = "MISS"

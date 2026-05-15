@@ -263,6 +263,24 @@ def get_latest_post_total_timeout_seconds() -> float:
     return max(5.0, value)
 
 
+def get_latest_post_uid_resolve_timeout_seconds() -> float:
+    raw = str(os.getenv("LATEST_POST_UID_RESOLVE_TIMEOUT", "5")).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 5.0
+    return max(2.0, min(25.0, value))
+
+
+def get_latest_post_uid_fallback_timeout_seconds() -> float:
+    raw = str(os.getenv("LATEST_POST_UID_FALLBACK_TIMEOUT", "4")).strip()
+    try:
+        value = float(raw)
+    except Exception:
+        value = 4.0
+    return max(2.0, min(20.0, value))
+
+
 def build_forward_url(base_url: str, query_string: str = "") -> str:
     target = str(base_url or "").strip()
     if not target:
@@ -3197,6 +3215,22 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
             result["status"] = "UNKNOWN"
             result["reason"] = f"uid_dead_rechecked_unknown:{result.get('reason', '-')}"
 
+    # UID-only flow: when /check gets a UID (no URL), still run one public-url fallback
+    # so realtime watchers tracking by UID are less likely to stay UNKNOWN forever.
+    if (not raw_url_is_facebook) and uid and result_status in {"UNKNOWN", "CHECKPOINT", "DIE"}:
+        uid_profile_url = f"https://www.facebook.com/profile.php?id={uid}"
+        uid_fallback = await check_facebook_url_without_uid(uid_profile_url, req.proxy, req.cookies, request_pool)
+        uid_fallback_status = str(uid_fallback.get("status") or "").upper()
+        if uid_fallback_status in {"LIVE", "DIE"}:
+            uid_fallback["uid"] = normalize_uid(uid_fallback.get("uid")) or uid
+            fallback_name = str(uid_fallback.get("profileName") or "").strip()
+            if not is_valid_profile_name(fallback_name):
+                result_name = str(result.get("profileName") or "").strip()
+                if is_valid_profile_name(result_name):
+                    uid_fallback["profileName"] = result_name
+            uid_fallback["ok"] = True
+            return uid_fallback
+
     if result_status == "LIVE":
         result_name = str(result.get("profileName") or "").strip()
         if not is_valid_profile_name(result_name):
@@ -3250,9 +3284,21 @@ async def latest_post_impl(req: CheckRequest) -> Dict[str, Any]:
     request_pool = req.cookiesPool or req.cookies_pool
     uid = normalize_uid(req.uid) or extract_uid_from_url(raw_url)
     if not uid and raw_url:
-        uid = await resolve_uid_from_facebook_url(raw_url, req.proxy, req.cookies, request_pool)
+        try:
+            uid = await asyncio.wait_for(
+                resolve_uid_from_facebook_url(raw_url, req.proxy, req.cookies, request_pool),
+                timeout=get_latest_post_uid_resolve_timeout_seconds(),
+            )
+        except asyncio.TimeoutError:
+            uid = ""
     if not uid and raw_url and ("facebook.com/" in raw_url.lower() or "fb.com/" in raw_url.lower()):
-        fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
+        try:
+            fallback = await asyncio.wait_for(
+                check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool),
+                timeout=get_latest_post_uid_fallback_timeout_seconds(),
+            )
+        except asyncio.TimeoutError:
+            fallback = {}
         uid = pick_uid_from_fallback_result(fallback)
 
     if not uid:
