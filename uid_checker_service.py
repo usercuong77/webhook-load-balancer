@@ -1304,14 +1304,28 @@ def parse_latest_post_from_html(html_raw: Any) -> Optional[Dict[str, Any]]:
 
     post_id = ""
     timestamp = 0
+    best_pair_post_id = ""
+    best_pair_timestamp = 0
 
     for pattern in LATEST_POST_PAIR_PATTERNS:
-        match = re.search(pattern, html, flags=re.I)
-        if not match:
-            continue
-        post_id = str(match.group(1) or "").strip()
-        timestamp = normalize_unix_timestamp_seconds(match.group(2))
-        break
+        for match in re.finditer(pattern, html, flags=re.I):
+            candidate_post_id = str(match.group(1) or "").strip()
+            if not is_latest_post_id_token(candidate_post_id):
+                continue
+            candidate_timestamp = normalize_unix_timestamp_seconds(match.group(2))
+            if not best_pair_post_id:
+                best_pair_post_id = candidate_post_id
+                best_pair_timestamp = candidate_timestamp
+                continue
+            if candidate_timestamp and (
+                not best_pair_timestamp or candidate_timestamp > best_pair_timestamp
+            ):
+                best_pair_post_id = candidate_post_id
+                best_pair_timestamp = candidate_timestamp
+
+    if best_pair_post_id:
+        post_id = best_pair_post_id
+        timestamp = best_pair_timestamp
 
     if not post_id:
         for pattern in LATEST_POST_ID_PATTERNS:
@@ -1629,18 +1643,39 @@ async def fetch_latest_facebook_post_once(
                     body = await resp.text(errors="ignore")
                     final_url = str(resp.url)
                     parsed = parse_latest_post_from_html(body)
-                    has_post_candidate = bool(parsed and is_latest_post_id_token(parsed.get("postId")))
-                    has_evidence = has_post_candidate and has_latest_post_evidence_in_html(body, parsed.get("postId"))
+                    parsed_post_id = str(parsed.get("postId") or "").strip() if isinstance(parsed, dict) else ""
+                    parsed_timestamp = int(parsed.get("timestamp") or 0) if isinstance(parsed, dict) else 0
+                    has_post_candidate = bool(parsed_post_id and is_latest_post_id_token(parsed_post_id))
+                    has_evidence = has_post_candidate and has_latest_post_evidence_in_html(body, parsed_post_id)
                     http_success = 200 <= http_code < 400
+                    candidate_final_url_post_id = (
+                        extract_facebook_post_id_from_url(final_url)
+                        if has_post_candidate else ""
+                    )
+                    post_content = (
+                        extract_latest_post_content_from_html(body, parsed_post_id)
+                        if has_post_candidate else ""
+                    )
+                    no_cookie_candidate_ok = (
+                        bool(parsed_timestamp)
+                        or (
+                            bool(candidate_final_url_post_id)
+                            and candidate_final_url_post_id == parsed_post_id
+                        )
+                        or bool(post_content)
+                    )
+                    candidate_trust_ok = has_post_candidate and http_success and (
+                        has_evidence
+                        or (not normalized_session_cookies and no_cookie_candidate_ok)
+                    )
 
-                    if has_post_candidate and has_evidence and http_success:
-                        post_content = extract_latest_post_content_from_html(body, parsed["postId"])
+                    if candidate_trust_ok:
                         return {
                             "ok": True,
                             "uid": normalized_uid,
-                            "postId": parsed["postId"],
-                            "timestamp": parsed["timestamp"],
-                            "link": build_latest_post_link(normalized_uid, parsed["postId"]),
+                            "postId": parsed_post_id,
+                            "timestamp": parsed_timestamp,
+                            "link": build_latest_post_link(normalized_uid, parsed_post_id),
                             "content": post_content,
                             "postContent": post_content,
                             "method": "with_cookie" if normalized_session_cookies else "no_cookie",
@@ -1658,7 +1693,11 @@ async def fetch_latest_facebook_post_once(
                         }
                     fail_reason = build_latest_post_failure_reason(body, final_url, http_code)
                     if has_post_candidate and not has_evidence and http_success:
-                        fail_reason = f"latest_post_candidate_untrusted_http_{http_code or 0}"
+                        fail_reason = (
+                            f"latest_post_candidate_untrusted_http_{http_code or 0}"
+                            if normalized_session_cookies or not no_cookie_candidate_ok
+                            else f"latest_post_candidate_skipped_http_{http_code or 0}"
+                        )
                     attempts.append(
                         {
                             "url": probe_url,

@@ -216,8 +216,8 @@ TELEGRAM_HEAVY_QUEUE_COMMAND_MAP = {
     "/lamoi": "viplike_refresh",
     "/refreshviplike": "viplike_refresh",
 }
-CHECKER_CACHE_VERSION = "step48_viplike_queue_latestpost_cache_v1"
-DEBUG_LOG_VERSION = "step48_viplike_queue_latestpost_cache_v1_2026-05-15"
+CHECKER_CACHE_VERSION = "step49_viplike_no_cookie_fix_v1"
+DEBUG_LOG_VERSION = "step49_viplike_no_cookie_fix_v1_2026-05-15"
 CORS_ALLOWED_ORIGINS = _parse_urls(os.getenv("CORS_ALLOWED_ORIGINS", "*")) or ["*"]
 CORS_ALLOW_HEADERS = (
     os.getenv(
