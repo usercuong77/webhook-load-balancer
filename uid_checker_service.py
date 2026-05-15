@@ -38,6 +38,13 @@ APP_NAME = "uid-checker-service"
 API_KEY = os.getenv("UID_CHECKER_API_KEY", "").strip()
 HTTP_TIMEOUT_SECONDS = float(os.getenv("UID_CHECKER_TIMEOUT", "10"))
 LATEST_POST_TOTAL_TIMEOUT_SECONDS = float(os.getenv("LATEST_POST_TOTAL_TIMEOUT", "15"))
+CHECK_UID_ENABLE_EXTRA_HEADERS = str(os.getenv("CHECK_UID_ENABLE_EXTRA_HEADERS", "0")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CHECK_UID_COOKIE_FALLBACK_MAX = max(0, min(3, int(os.getenv("CHECK_UID_COOKIE_FALLBACK_MAX", "1") or 1)))
 LIVE_CHECK_DEFAULT_CONCURRENCY = int(os.getenv("LIVE_CHECK_CONCURRENCY", "25"))
 LIVE_CHECK_PAGE_TIMEOUT_MS = int(os.getenv("LIVE_CHECK_TIMEOUT_MS", "15000"))
 UID_PROBE_UA_FILE = os.getenv("UID_PROBE_UA_FILE", "uid_probe_user_agents.txt").strip()
@@ -2490,7 +2497,13 @@ async def check_uid_once(
     proxy: Optional[str] = None,
     session_cookies: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
-    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+    normalized_session_cookies = normalize_cookies(session_cookies)
+    timeout = aiohttp.ClientTimeout(
+        total=max(
+            2.5,
+            min(float(HTTP_TIMEOUT_SECONDS), 7.5 if normalized_session_cookies else 5.5),
+        )
+    )
     header_candidates = build_public_probe_headers()
     if not header_candidates:
         header_candidates = [
@@ -2513,7 +2526,6 @@ async def check_uid_once(
         ("www", www_url),
         ("mbasic", mbasic_url),
     ]
-    normalized_session_cookies = normalize_cookies(session_cookies)
 
     async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
         redirect_task = probe_redirect(uid, session, primary_headers, proxy)
@@ -2543,6 +2555,8 @@ async def check_uid_once(
     checkpoint_public = [item for item in public_signals if item.get("status") == "CHECKPOINT"]
 
     should_probe_more_headers = (
+        CHECK_UID_ENABLE_EXTRA_HEADERS
+        and
         not live_public
         and not die_public
         and graph_state != "LIVE"
@@ -2550,7 +2564,7 @@ async def check_uid_once(
     )
 
     if should_probe_more_headers:
-        timeout_extra = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
+        timeout_extra = aiohttp.ClientTimeout(total=max(2.5, min(float(HTTP_TIMEOUT_SECONDS), 5.5)))
         async with aiohttp.ClientSession(timeout=timeout_extra, cookies=normalized_session_cookies) as session:
             extra_tasks = []
             for header_index, headers in enumerate(header_candidates[1:], start=2):
@@ -2659,13 +2673,22 @@ async def check_uid(
     cookies_pool: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     candidates = build_cookie_candidates(cookies, cookies_pool)
+    if len(candidates) > 1:
+        no_cookie = [item for item in candidates if str(item.get("source") or "") == "no_cookie"]
+        with_cookie = [item for item in candidates if str(item.get("source") or "") != "no_cookie"]
+        candidates = no_cookie + with_cookie
     attempts: List[Dict[str, Any]] = []
     final_result: Optional[Dict[str, Any]] = None
     best_live_result: Optional[Dict[str, Any]] = None
+    cookie_fallback_used = 0
 
     for idx, candidate in enumerate(candidates):
         candidate_cookies = candidate.get("cookies") if isinstance(candidate, dict) else {}
         source = str(candidate.get("source") if isinstance(candidate, dict) else "") or f"cookie_{idx + 1}"
+        is_no_cookie = source == "no_cookie"
+
+        if not is_no_cookie and cookie_fallback_used >= CHECK_UID_COOKIE_FALLBACK_MAX:
+            break
 
         current = await check_uid_once(uid=uid, proxy=proxy, session_cookies=candidate_cookies)
         current_signals = current.get("signals")
@@ -2683,6 +2706,8 @@ async def check_uid(
                 "cookieCount": len(normalize_cookies(candidate_cookies if isinstance(candidate_cookies, dict) else None)),
             }
         )
+        if not is_no_cookie:
+            cookie_fallback_used += 1
         final_result = current
 
         has_next = idx < (len(candidates) - 1)
@@ -2709,6 +2734,7 @@ async def check_uid(
     if isinstance(final_signals, dict):
         final_signals["cookieFallbackUsed"] = len(attempts) > 1
         final_signals["cookieAttempts"] = attempts
+        final_signals["cookieFallbackBudget"] = CHECK_UID_COOKIE_FALLBACK_MAX
     profile_name = pick_profile_name_from_result(final_result)
     if profile_name:
         final_result["profileName"] = profile_name
