@@ -1500,10 +1500,10 @@ async def fetch_latest_facebook_post_once(
 
     normalized_session_cookies = normalize_cookies(session_cookies)
     request_timeout_seconds = max(
-        2.5,
+        2.0,
         min(
             float(HTTP_TIMEOUT_SECONDS),
-            6.0 if normalized_session_cookies else 3.5,
+            4.5 if normalized_session_cookies else 2.8,
         ),
     )
     timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
@@ -1541,7 +1541,7 @@ async def fetch_latest_facebook_post_once(
     }
     probe_urls = build_facebook_latest_post_probe_urls(normalized_uid)
     attempts: List[Dict[str, Any]] = []
-    max_attempts = 10 if normalized_session_cookies else 4
+    max_attempts = 4 if normalized_session_cookies else 3
     attempts_made = 0
 
     async with aiohttp.ClientSession(timeout=timeout, cookies=normalized_session_cookies) as session:
@@ -1638,6 +1638,38 @@ async def fetch_latest_facebook_post_once(
     }
 
 
+def should_try_cookie_fallback_for_latest_post(result_raw: Any) -> bool:
+    result = result_raw if isinstance(result_raw, dict) else {}
+    if bool(result.get("ok")) and str(result.get("postId") or "").strip():
+        return False
+
+    reason = str(result.get("reason") or "").lower()
+    http_code = int(result.get("httpCode") or 0)
+
+    if not reason:
+        return True
+    if reason.startswith("auth_wall"):
+        return True
+    if reason.startswith("checkpoint"):
+        return True
+    if reason.startswith("unsupported_browser_interstitial"):
+        return True
+    if reason.startswith("facebook_error_page"):
+        return True
+    if reason.startswith("exception:"):
+        return True
+    if reason.startswith("latest_post_timeout"):
+        return True
+    if reason.startswith("latest_post_not_found"):
+        if http_code in (429, 500, 502, 503, 504, 0):
+            return True
+        # No-cookie produced deterministic "no post" signals -> skip cookie to keep response fast.
+        return False
+    if reason.startswith("timeline_shell_no_post_data"):
+        return False
+    return False
+
+
 async def get_latest_facebook_post(
     uid: str,
     proxy: Optional[str] = None,
@@ -1646,17 +1678,23 @@ async def get_latest_facebook_post(
 ) -> Dict[str, Any]:
     candidates = build_cookie_candidates(cookies, cookies_pool)
     if len(candidates) > 1:
-        with_cookie = [item for item in candidates if str(item.get("source") or "") != "no_cookie"]
+        # Always run no-cookie first; cookie is fallback only.
         no_cookie = [item for item in candidates if str(item.get("source") or "") == "no_cookie"]
-        if with_cookie:
-            candidates = with_cookie + no_cookie
+        with_cookie = [item for item in candidates if str(item.get("source") or "") != "no_cookie"]
+        candidates = no_cookie + with_cookie
     cookie_attempts: List[Dict[str, Any]] = []
     final_result: Optional[Dict[str, Any]] = None
     best_failure: Optional[Dict[str, Any]] = None
+    cookie_fallback_budget = max(0, min(2, int(os.getenv("LATEST_POST_COOKIE_FALLBACK_MAX", "1") or 1)))
+    cookie_fallback_used = 0
 
     for idx, candidate in enumerate(candidates):
         candidate_cookies = candidate.get("cookies") if isinstance(candidate, dict) else {}
         source = str(candidate.get("source") if isinstance(candidate, dict) else "") or f"cookie_{idx + 1}"
+        is_no_cookie = source == "no_cookie"
+
+        if not is_no_cookie and cookie_fallback_used >= cookie_fallback_budget:
+            break
 
         current = await fetch_latest_facebook_post_once(
             uid=uid,
@@ -1676,10 +1714,14 @@ async def get_latest_facebook_post(
                 "cookieCount": len(normalize_cookies(candidate_cookies if isinstance(candidate_cookies, dict) else None)),
             }
         )
+        if not is_no_cookie:
+            cookie_fallback_used += 1
         if current.get("ok"):
             final_result = current
             break
         best_failure = choose_better_latest_post_result(best_failure, current)
+        if is_no_cookie and not should_try_cookie_fallback_for_latest_post(current):
+            break
 
     if not final_result:
         final_result = best_failure or {
@@ -1695,6 +1737,7 @@ async def get_latest_facebook_post(
 
     final_result["cookieAttempts"] = cookie_attempts
     final_result["cookieFallbackUsed"] = len(cookie_attempts) > 1
+    final_result["cookieFallbackBudget"] = cookie_fallback_budget
     return final_result
 
 
@@ -2104,7 +2147,7 @@ def is_valid_profile_name(raw_name: str) -> bool:
     if re.search(r"(sorry|browser|unsupported|login|sign up|notification|message|friend|logout)", low):
         return False
 
-    return bool(re.search(r"[A-Za-zÀ-ỹ]", name))
+    return any(ch.isalpha() for ch in name)
 
 
 def extract_profile_name(html: str) -> str:
@@ -2387,6 +2430,59 @@ def pick_profile_name_from_result(result: Dict[str, Any]) -> str:
 
 def result_has_profile_name(result: Dict[str, Any]) -> bool:
     return bool(pick_profile_name_from_result(result))
+
+
+async def enrich_profile_name_for_live_uid(
+    uid_raw: Any,
+    proxy: Optional[str] = None,
+    cookies: Optional[Dict[str, str]] = None,
+    cookies_pool: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    uid = normalize_uid(uid_raw)
+    if not uid:
+        return ""
+
+    candidates = build_cookie_candidates(cookies, cookies_pool)
+    headers_list = build_public_probe_headers()
+    if not headers_list:
+        headers_list = [
+            {
+                "User-Agent": PUBLIC_PROFILE_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Referer": "https://m.facebook.com/",
+            }
+        ]
+    headers = headers_list[0]
+    probe_urls = [
+        ("m_name", f"https://m.facebook.com/profile.php?id={uid}"),
+        ("touch_name", f"https://touch.facebook.com/profile.php?id={uid}"),
+        ("www_name", f"https://www.facebook.com/profile.php?id={uid}"),
+    ]
+
+    # Prefer no-cookie first, then at most one cookie fallback to keep this fast.
+    no_cookie = [item for item in candidates if str(item.get("source") or "") == "no_cookie"]
+    with_cookie = [item for item in candidates if str(item.get("source") or "") != "no_cookie"][:1]
+    ordered_candidates = no_cookie + with_cookie
+
+    timeout = aiohttp.ClientTimeout(total=max(2.5, min(float(HTTP_TIMEOUT_SECONDS), 4.5)))
+    for candidate in ordered_candidates:
+        candidate_cookies = normalize_cookies(candidate.get("cookies") if isinstance(candidate, dict) else None)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, cookies=candidate_cookies) as session:
+                for source_name, probe_url in probe_urls:
+                    signal = await probe_public_page(source_name, probe_url, session, headers, proxy)
+                    if not isinstance(signal, dict):
+                        continue
+                    if str(signal.get("status") or "").upper() not in {"LIVE", "OK"}:
+                        continue
+                    name = re.sub(r"\s+", " ", str(signal.get("name") or "")).strip()
+                    if is_valid_profile_name(name):
+                        return name
+        except Exception:
+            continue
+
+    return ""
 
 
 async def check_uid_once(
@@ -2969,12 +3065,39 @@ async def check(req: CheckRequest, x_api_key: Optional[str] = Header(default=Non
         url_fallback = await check_facebook_url_without_uid(raw_url, req.proxy, req.cookies, request_pool)
         fallback_status = str(url_fallback.get("status") or "").upper()
         if fallback_status == "LIVE":
-            url_fallback["uid"] = normalize_uid(url_fallback.get("uid")) or uid
+            fallback_uid = normalize_uid(url_fallback.get("uid")) or uid
+            url_fallback["uid"] = fallback_uid
+            fallback_name = str(url_fallback.get("profileName") or "").strip()
+            if not is_valid_profile_name(fallback_name):
+                name_from_result = str(result.get("profileName") or "").strip()
+                if is_valid_profile_name(name_from_result):
+                    url_fallback["profileName"] = name_from_result
+                else:
+                    enriched = await enrich_profile_name_for_live_uid(
+                        fallback_uid,
+                        req.proxy,
+                        req.cookies,
+                        request_pool,
+                    )
+                    if is_valid_profile_name(enriched):
+                        url_fallback["profileName"] = enriched
             url_fallback["ok"] = True
             return url_fallback
         if result_status == "DIE" and is_facebook_username_identity_url(raw_url) and fallback_status == "UNKNOWN":
             result["status"] = "UNKNOWN"
             result["reason"] = f"uid_dead_rechecked_unknown:{result.get('reason', '-')}"
+
+    if result_status == "LIVE":
+        result_name = str(result.get("profileName") or "").strip()
+        if not is_valid_profile_name(result_name):
+            enriched_name = await enrich_profile_name_for_live_uid(
+                uid,
+                req.proxy,
+                req.cookies,
+                request_pool,
+            )
+            if is_valid_profile_name(enriched_name):
+                result["profileName"] = enriched_name
 
     result["ok"] = True
     return result

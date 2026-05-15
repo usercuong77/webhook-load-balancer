@@ -166,7 +166,7 @@ TELEGRAM_LOADING_TEXT = os.getenv("TELEGRAM_LOADING_TEXT", "Đang chạy...").st
 TELEGRAM_LOADING_TIMEOUT_SEC = max(1, _env_int("TELEGRAM_LOADING_TIMEOUT_SEC", 4))
 TELEGRAM_BOT_TOKENS = _load_telegram_bot_token_map()
 TELEGRAM_HEAVY_QUEUE_ENABLED = _env_bool("TELEGRAM_HEAVY_QUEUE_ENABLED", True)
-TELEGRAM_HEAVY_QUEUE_WORKERS = max(1, _env_int("TELEGRAM_HEAVY_QUEUE_WORKERS", 2))
+TELEGRAM_HEAVY_QUEUE_WORKERS = max(1, _env_int("TELEGRAM_HEAVY_QUEUE_WORKERS", 4))
 TELEGRAM_HEAVY_QUEUE_MAX_SIZE = max(10, _env_int("TELEGRAM_HEAVY_QUEUE_MAX_SIZE", 200))
 TELEGRAM_HEAVY_QUEUE_NON_COMMANDS = _env_bool("TELEGRAM_HEAVY_QUEUE_NON_COMMANDS", True)
 TELEGRAM_HEAVY_COMMANDS = _parse_csv_set(
@@ -228,6 +228,8 @@ TELEGRAM_HEAVY_QUEUE_METRICS_LOCK = threading.Lock()
 TELEGRAM_DURABLE_QUEUE_RECOVERED = False
 TELEGRAM_DURABLE_QUEUE_RECOVER_LOCK = threading.Lock()
 TELEGRAM_DURABLE_LAST_EMPTY_ACTIVE_FULL_SCAN_AT = 0.0
+TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR = 0
+TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR_LOCK = threading.Lock()
 TELEGRAM_HEAVY_QUEUE_METRICS = {
     "enqueued": 0,
     "processed": 0,
@@ -766,6 +768,17 @@ def _telegram_active_durable_queue_names() -> List[str]:
     return [name for name in TELEGRAM_HEAVY_QUEUE_SCAN_ORDER if name in names_set]
 
 
+def _ordered_active_durable_queue_names() -> List[str]:
+    names = _telegram_active_durable_queue_names()
+    if len(names) <= 1:
+        return names
+    global TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR
+    with TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR_LOCK:
+        start = TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR % len(names)
+        TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR = (TELEGRAM_DURABLE_QUEUE_SCAN_CURSOR + 1) % len(names)
+    return names[start:] + names[:start]
+
+
 def _build_telegram_heavy_job(payload: Dict, forward_params: Dict[str, str], dedup_key: str) -> Dict:
     command = _telegram_command_from_payload(payload) or "__text__"
     queue_name = _telegram_heavy_queue_name_from_payload(payload)
@@ -1003,7 +1016,7 @@ def _next_telegram_heavy_queue_job() -> Tuple[str, Dict]:
             pass
 
         if _durable_queue_configured():
-            for queue_name in _telegram_active_durable_queue_names():
+            for queue_name in _ordered_active_durable_queue_names():
                 durable_job = _claim_telegram_heavy_durable_job(queue_name)
                 if durable_job:
                     return f"durable:{queue_name}", durable_job
