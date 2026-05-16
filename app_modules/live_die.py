@@ -532,6 +532,7 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
         return {"uid": "", "source": "no_probe_url", "attempts": [], "resolvedUsername": "", "resolvedUrl": ""}
 
     attempts: List[Dict] = []
+    derived_username = _extract_username_slug_from_url(url_raw)
     for headers in _build_uid_probe_header_candidates():
         for probe_url in probe_urls:
             try:
@@ -551,6 +552,8 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
             uid_html = _extract_uid_from_html(response.get("text"))
             uid_final = _extract_uid_from_url(final_url)
             resolved_username = _extract_username_slug_from_url(final_url) or _extract_username_from_login_next(final_url)
+            if resolved_username and not derived_username:
+                derived_username = resolved_username
             attempts.append(
                 {
                     "url": probe_url,
@@ -583,7 +586,7 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
         "uid": "",
         "source": "not_found",
         "attempts": attempts,
-        "resolvedUsername": _extract_username_slug_from_url(url_raw),
+        "resolvedUsername": derived_username,
         "resolvedUrl": _normalize_url_input(url_raw),
     }
 
