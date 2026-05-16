@@ -32,6 +32,12 @@ FACEBOOK_RESERVED_PATH_PREFIXES = {
 }
 
 UID_SCRAPE_PATTERNS = (
+    r'<meta[^>]+property=["\']al:ios:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']al:android:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']al:web:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https?:\/\/(?:www\.)?facebook\.com\/profile\.php\?id=(\d{8,20})',
+    r'"profile_owner"\s*:\s*"(\d{8,20})"',
+    r'"owner"\s*:\s*\{\s*"id"\s*:\s*"(\d{8,20})"',
     r'"userID"\s*:\s*"(\d{8,20})"',
     r'"profile_id"\s*:\s*(\d{8,20})',
     r'"entity_id"\s*:\s*"(\d{8,20})"',
@@ -239,6 +245,7 @@ def build_facebook_navigation_hint_headers(user_agent_raw: Optional[str]) -> Dic
         platform = '"iOS"'
         mobile = "?1"
     return {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
@@ -247,6 +254,8 @@ def build_facebook_navigation_hint_headers(user_agent_raw: Optional[str]) -> Dic
         "sec-ch-ua-mobile": mobile,
         "sec-ch-ua-platform": platform,
         "Cache-Control": "max-age=0",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": "https://www.facebook.com/",
     }
 
 

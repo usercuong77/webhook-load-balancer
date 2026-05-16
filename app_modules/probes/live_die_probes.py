@@ -165,21 +165,27 @@ def graphql_node_probe(uid: str, fetcher: Optional[Callable] = None) -> ProbeRes
     try:
         payload = json.loads(response["text"] or "{}")
     except Exception:
-        payload = {}
-    node = payload.get(uid) if isinstance(payload, dict) else None
+        return ProbeResult("graphql_node", "unknown", "weak", http_status, "graphql_json_invalid", response["url"])
+    if not isinstance(payload, dict):
+        return ProbeResult("graphql_node", "unknown", "weak", http_status, "graphql_payload_not_object", response["url"])
+    if payload.get("error"):
+        return ProbeResult("graphql_node", "unknown", "weak", http_status, "graphql_error_payload", response["url"])
+
+    node = payload.get(uid)
     profile_name_raw = ""
     if isinstance(node, dict):
         profile_name_raw = to_text(node.get("name"))
     elif isinstance(node, str):
         profile_name_raw = node
     profile_name = clean_profile_name_candidate(profile_name_raw) if is_valid_profile_name(profile_name_raw) else ""
-    is_dead = node is None or node == ""
+    if node is None or node == "":
+        return ProbeResult("graphql_node", "unknown", "weak", http_status, "graphql_node_missing", response["url"], profile_name)
     return ProbeResult(
         "graphql_node",
-        "dead" if is_dead else "live",
+        "live",
         "strong",
         http_status,
-        "graphql_node_empty" if is_dead else "graphql_node_found",
+        "graphql_node_found",
         response["url"],
         profile_name,
     )

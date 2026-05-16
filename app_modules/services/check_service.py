@@ -21,7 +21,7 @@ from app_modules.resolvers.uid_resolver import (
 )
 
 
-VERSION = "step13_modular_core_extract_share_cache_2026_05_16"
+VERSION = "step14_uid_share_resolve_binary_modes_2026_05_16"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
@@ -131,6 +131,48 @@ def _run_probe_by_name(probe_name: str, uid: str, profile_url: str, username: st
     return probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
 
 
+def _force_binary_status(
+    chosen_raw: Dict,
+    uid: str,
+    profile_url: str,
+    username: str,
+    fetcher=None,
+) -> Dict:
+    chosen = chosen_raw if isinstance(chosen_raw, dict) else {}
+    current_status = to_text(chosen.get("status")).strip().lower()
+    if current_status in ("live", "dead"):
+        return chosen
+
+    fallback_probe = probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
+    if fallback_probe.status in ("live", "dead"):
+        return {
+            "status": fallback_probe.status,
+            "confidence": fallback_probe.confidence or "weak",
+            "source": "binary_fallback_html_mobile",
+            "httpStatus": fallback_probe.http_status,
+            "reason": "binary_fallback:" + to_text(fallback_probe.reason or "html_mobile"),
+        }
+
+    if uid:
+        graph_probe = probe_core.graph_picture_app_token_probe(uid, fetcher)
+        if graph_probe.status in ("live", "dead"):
+            return {
+                "status": graph_probe.status,
+                "confidence": graph_probe.confidence or "weak",
+                "source": "binary_fallback_graph_app",
+                "httpStatus": graph_probe.http_status,
+                "reason": "binary_fallback:" + to_text(graph_probe.reason or "graph_app"),
+            }
+
+    return {
+        "status": "dead",
+        "confidence": "weak",
+        "source": to_text(chosen.get("source")) or "binary_fallback_forced_dead",
+        "httpStatus": int(chosen.get("httpStatus") or 0),
+        "reason": "binary_forced_dead:" + to_text(chosen.get("reason") or "no_stable_signal"),
+    }
+
+
 def _profile_name_cache_get(uid_raw: Optional[str]) -> str:
     uid = to_text(uid_raw).strip()
     if not uid:
@@ -193,6 +235,7 @@ def _run_check_pipeline(raw_input: str, fetcher=None, probe_mode_raw: Optional[s
         probes.append(_run_probe_by_name(probe_name, uid, profile_url, username, fetcher))
 
     chosen = probe_core.choose_result(probes)
+    chosen = _force_binary_status(chosen, uid, profile_url, username, fetcher)
     profile_name_pick = probe_core.pick_profile_name_from_probes(probes, chosen["status"])
     if not profile_name_pick["profileName"] and to_text(chosen["status"]).lower() == "live":
         enriched_name = probe_core.enrich_profile_name_for_live_profile(

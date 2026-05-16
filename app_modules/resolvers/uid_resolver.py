@@ -4,7 +4,7 @@ import time
 from typing import Callable, Dict, Optional
 from urllib.parse import quote
 
-from app_modules.config import FB_PUBLIC_APP_TOKEN
+from app_modules.config import FB_PUBLIC_APP_TOKEN, UID_CHECKER_FB_COOKIES_JSON
 from app_modules.http_client import get_text, request_text
 from app_modules.parsers.facebook_url import (
     build_facebook_probe_urls,
@@ -26,6 +26,38 @@ def to_text(value) -> str:
 UID_RESOLVE_CACHE_TTL_SEC = max(60, int(os.getenv("UID_RESOLVE_CACHE_TTL_SEC", "21600")))
 UID_RESOLVE_CACHE_MAX_ITEMS = max(100, int(os.getenv("UID_RESOLVE_CACHE_MAX_ITEMS", "2000")))
 UID_RESOLVE_CACHE: Dict[str, Dict[str, str]] = {}
+
+
+def _normalize_cookie_map(cookies_raw) -> Dict[str, str]:
+    if not isinstance(cookies_raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in cookies_raw.items():
+        cookie_key = to_text(key).strip()
+        cookie_value = to_text(value).strip()
+        if cookie_key and cookie_value:
+            out[cookie_key] = cookie_value
+    return out
+
+
+def _load_default_uid_probe_cookies() -> Dict[str, str]:
+    raw = to_text(UID_CHECKER_FB_COOKIES_JSON).strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(parsed, list):
+        for item in parsed:
+            normalized = _normalize_cookie_map(item)
+            if normalized:
+                return normalized
+        return {}
+    return _normalize_cookie_map(parsed)
+
+
+DEFAULT_UID_PROBE_COOKIES = _load_default_uid_probe_cookies()
 
 
 def _uid_cache_get(cache_key_raw: Optional[str]) -> Optional[Dict[str, str]]:
@@ -127,102 +159,126 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
 
     attempts = []
     derived_username = extract_username_slug_from_url(url_raw)
-    for headers in build_uid_probe_header_candidates():
-        for probe_url in probe_urls:
-            try:
-                response = request_text("get", probe_url, fetcher=fetcher, headers=headers)
-            except Exception:
+    cookie_rounds = [("no_cookie", {})]
+    if DEFAULT_UID_PROBE_COOKIES:
+        cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
+
+    for cookie_source, cookie_map in cookie_rounds:
+        for headers in build_uid_probe_header_candidates():
+            for probe_url in probe_urls:
+                try:
+                    response = request_text(
+                        "get",
+                        probe_url,
+                        fetcher=fetcher,
+                        headers=headers,
+                        cookies=cookie_map or None,
+                    )
+                except Exception:
+                    attempts.append(
+                        {
+                            "url": probe_url,
+                            "status": 0,
+                            "ua": to_text(headers.get("User-Agent"))[:80],
+                            "cookieSource": cookie_source,
+                            "error": "request_exception",
+                        }
+                    )
+                    continue
+
+                final_url = to_text(response.get("url"))
+                uid_html = extract_uid_from_html(response.get("text"))
+                uid_final = extract_uid_from_url(final_url)
+                resolved_username = extract_username_slug_from_url(final_url) or extract_username_from_login_next(final_url)
+                if resolved_username and not derived_username:
+                    derived_username = resolved_username
                 attempts.append(
                     {
                         "url": probe_url,
-                        "status": 0,
+                        "status": int(response.get("status_code") or 0),
+                        "finalUrl": final_url,
                         "ua": to_text(headers.get("User-Agent"))[:80],
-                        "error": "request_exception",
+                        "cookieSource": cookie_source,
+                        "uidFromHtml": uid_html,
+                        "uidFromFinalUrl": uid_final,
                     }
                 )
-                continue
+                if uid_html:
+                    if share_token:
+                        _uid_cache_put("share:" + share_token.lower(), uid_html, resolved_username)
+                    if resolved_username:
+                        _uid_cache_put("username:" + resolved_username.lower(), uid_html, resolved_username)
+                    return {
+                        "uid": uid_html,
+                        "source": "html_pattern",
+                        "attempts": attempts,
+                        "resolvedUsername": resolved_username,
+                        "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_html}",
+                    }
 
-            final_url = to_text(response.get("url"))
-            uid_html = extract_uid_from_html(response.get("text"))
-            uid_final = extract_uid_from_url(final_url)
-            resolved_username = extract_username_slug_from_url(final_url) or extract_username_from_login_next(final_url)
-            if resolved_username and not derived_username:
-                derived_username = resolved_username
-            attempts.append(
-                {
-                    "url": probe_url,
-                    "status": int(response.get("status_code") or 0),
-                    "finalUrl": final_url,
-                    "ua": to_text(headers.get("User-Agent"))[:80],
-                    "uidFromHtml": uid_html,
-                    "uidFromFinalUrl": uid_final,
-                }
-            )
-            if uid_html:
-                if share_token:
-                    _uid_cache_put("share:" + share_token.lower(), uid_html, resolved_username)
-                if resolved_username:
-                    _uid_cache_put("username:" + resolved_username.lower(), uid_html, resolved_username)
-                return {
-                    "uid": uid_html,
-                    "source": "html_pattern",
-                    "attempts": attempts,
-                    "resolvedUsername": resolved_username,
-                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_html}",
-                }
-
-            if uid_final:
-                if share_token:
-                    _uid_cache_put("share:" + share_token.lower(), uid_final, resolved_username)
-                if resolved_username:
-                    _uid_cache_put("username:" + resolved_username.lower(), uid_final, resolved_username)
-                return {
-                    "uid": uid_final,
-                    "source": "final_url",
-                    "attempts": attempts,
-                    "resolvedUsername": resolved_username,
-                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_final}",
-                }
+                if uid_final:
+                    if share_token:
+                        _uid_cache_put("share:" + share_token.lower(), uid_final, resolved_username)
+                    if resolved_username:
+                        _uid_cache_put("username:" + resolved_username.lower(), uid_final, resolved_username)
+                    return {
+                        "uid": uid_final,
+                        "source": "final_url",
+                        "attempts": attempts,
+                        "resolvedUsername": resolved_username,
+                        "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_final}",
+                    }
 
     if derived_username:
         username_probe_url = "https://www.facebook.com/" + quote(derived_username)
-        try:
-            response = request_text("get", username_probe_url, fetcher=fetcher)
-            final_url = to_text(response.get("url"))
-            uid_html = extract_uid_from_html(response.get("text"))
-            uid_final = extract_uid_from_url(final_url)
-            attempts.append(
-                {
-                    "url": username_probe_url,
-                    "status": int(response.get("status_code") or 0),
-                    "finalUrl": final_url,
-                    "ua": "username_direct_probe",
-                    "uidFromHtml": uid_html,
-                    "uidFromFinalUrl": uid_final,
-                }
-            )
-            chosen_uid = uid_html or uid_final
-            if chosen_uid:
-                if share_token:
-                    _uid_cache_put("share:" + share_token.lower(), chosen_uid, derived_username)
-                if derived_username:
-                    _uid_cache_put("username:" + derived_username.lower(), chosen_uid, derived_username)
-                return {
-                    "uid": chosen_uid,
-                    "source": "username_direct_probe",
-                    "attempts": attempts,
-                    "resolvedUsername": derived_username,
-                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={chosen_uid}",
-                }
-        except Exception:
-            attempts.append(
-                {
-                    "url": username_probe_url,
-                    "status": 0,
-                    "ua": "username_direct_probe",
-                    "error": "request_exception",
-                }
-            )
+        username_cookie_rounds = [("no_cookie", {})]
+        if DEFAULT_UID_PROBE_COOKIES:
+            username_cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
+        for cookie_source, cookie_map in username_cookie_rounds:
+            try:
+                response = request_text(
+                    "get",
+                    username_probe_url,
+                    fetcher=fetcher,
+                    cookies=cookie_map or None,
+                )
+                final_url = to_text(response.get("url"))
+                uid_html = extract_uid_from_html(response.get("text"))
+                uid_final = extract_uid_from_url(final_url)
+                attempts.append(
+                    {
+                        "url": username_probe_url,
+                        "status": int(response.get("status_code") or 0),
+                        "finalUrl": final_url,
+                        "ua": "username_direct_probe",
+                        "cookieSource": cookie_source,
+                        "uidFromHtml": uid_html,
+                        "uidFromFinalUrl": uid_final,
+                    }
+                )
+                chosen_uid = uid_html or uid_final
+                if chosen_uid:
+                    if share_token:
+                        _uid_cache_put("share:" + share_token.lower(), chosen_uid, derived_username)
+                    if derived_username:
+                        _uid_cache_put("username:" + derived_username.lower(), chosen_uid, derived_username)
+                    return {
+                        "uid": chosen_uid,
+                        "source": "username_direct_probe",
+                        "attempts": attempts,
+                        "resolvedUsername": derived_username,
+                        "resolvedUrl": f"https://www.facebook.com/profile.php?id={chosen_uid}",
+                    }
+            except Exception:
+                attempts.append(
+                    {
+                        "url": username_probe_url,
+                        "status": 0,
+                        "ua": "username_direct_probe",
+                        "cookieSource": cookie_source,
+                        "error": "request_exception",
+                    }
+                )
 
     return {
         "uid": "",
