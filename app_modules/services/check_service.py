@@ -38,6 +38,9 @@ PROBE_NAME_TO_MODE = dict((name, mode) for mode, name in PROBE_MODE_TO_NAME.item
 ALL_PROBE_MODES = ("1", "2", "3", "4", "5")
 ALL_PROBE_NAMES = tuple(PROBE_MODE_TO_NAME[mode] for mode in ALL_PROBE_MODES)
 PROBE_MODE_SYNTAX = "1|2|3|4|5|all"
+PROFILE_NAME_CACHE_TTL_SEC = 3 * 24 * 3600
+PROFILE_NAME_CACHE_MAX_ITEMS = 2000
+PROFILE_NAME_CACHE = {}
 
 
 def _now_ms() -> int:
@@ -128,6 +131,37 @@ def _run_probe_by_name(probe_name: str, uid: str, profile_url: str, username: st
     return probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
 
 
+def _profile_name_cache_get(uid_raw: Optional[str]) -> str:
+    uid = to_text(uid_raw).strip()
+    if not uid:
+        return ""
+    item = PROFILE_NAME_CACHE.get(uid)
+    if not item:
+        return ""
+    expires_at = int(item.get("expiresAt") or 0)
+    if expires_at and expires_at < int(time.time()):
+        PROFILE_NAME_CACHE.pop(uid, None)
+        return ""
+    name = to_text(item.get("name")).strip()
+    return name if name else ""
+
+
+def _profile_name_cache_put(uid_raw: Optional[str], profile_name_raw: Optional[str]) -> None:
+    uid = to_text(uid_raw).strip()
+    profile_name = to_text(profile_name_raw).strip()
+    if not uid or not profile_name:
+        return
+    PROFILE_NAME_CACHE[uid] = {
+        "name": profile_name,
+        "expiresAt": str(int(time.time()) + PROFILE_NAME_CACHE_TTL_SEC),
+    }
+    if len(PROFILE_NAME_CACHE) > PROFILE_NAME_CACHE_MAX_ITEMS:
+        keys = list(PROFILE_NAME_CACHE.keys())
+        trim = len(PROFILE_NAME_CACHE) - PROFILE_NAME_CACHE_MAX_ITEMS
+        for key in keys[:trim]:
+            PROFILE_NAME_CACHE.pop(key, None)
+
+
 def _run_check_pipeline(raw_input: str, fetcher=None, probe_mode_raw: Optional[str] = "all") -> Dict:
     started = _now_ms()
     mode_key = _normalize_probe_mode(probe_mode_raw)
@@ -175,6 +209,14 @@ def _run_check_pipeline(raw_input: str, fetcher=None, probe_mode_raw: Optional[s
         fallback_name = build_profile_name_from_username_slug(username)
         if fallback_name:
             profile_name_pick = {"profileName": fallback_name, "profileNameSource": "username_slug"}
+
+    if to_text(chosen["status"]).lower() == "live":
+        if profile_name_pick["profileName"] and profile_name_pick.get("profileNameSource") != "username_slug":
+            _profile_name_cache_put(uid, profile_name_pick["profileName"])
+        elif uid:
+            cached_name = _profile_name_cache_get(uid)
+            if cached_name:
+                profile_name_pick = {"profileName": cached_name, "profileNameSource": "uid_name_cache"}
 
     elapsed_ms = _now_ms() - started
     _log_probe_diagnostics(raw_input, uid, chosen["status"], chosen["source"], probes, elapsed_ms)
