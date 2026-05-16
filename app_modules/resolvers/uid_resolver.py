@@ -60,6 +60,43 @@ def _load_default_uid_probe_cookies() -> Dict[str, str]:
 DEFAULT_UID_PROBE_COOKIES = _load_default_uid_probe_cookies()
 
 
+def _is_login_like_url(url_raw: Optional[str]) -> bool:
+    url = to_text(url_raw).strip().lower()
+    if not url:
+        return True
+    return (
+        "/login" in url
+        or "/login.php" in url
+        or "checkpoint" in url
+        or "recover" in url
+    )
+
+
+def _is_cookie_uid_candidate_safe(
+    slug_raw: Optional[str],
+    final_url_raw: Optional[str],
+    response_html_raw: Optional[str],
+    resolved_username_raw: Optional[str],
+) -> bool:
+    slug = to_text(slug_raw).strip().lower()
+    if not slug:
+        return True
+    final_url = to_text(final_url_raw).strip().lower()
+    resolved_username = to_text(resolved_username_raw).strip().lower()
+    response_html = to_text(response_html_raw).strip().lower()
+
+    if _is_login_like_url(final_url):
+        return False
+    if resolved_username and resolved_username == slug:
+        return True
+    if ("/" + slug) in final_url:
+        return True
+    if response_html and slug in response_html:
+        # Accept when body still references the exact requested slug.
+        return True
+    return False
+
+
 def _uid_cache_get(cache_key_raw: Optional[str]) -> Optional[Dict[str, str]]:
     cache_key = to_text(cache_key_raw).strip().lower()
     if not cache_key:
@@ -149,9 +186,9 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
     attempts = []
     derived_username = extract_username_slug_from_url(url_raw)
     cookie_rounds = [("no_cookie", {})]
-    # Cookie round only for share links. For direct username/profile links,
-    # cookie can leak viewer identity and poison UID mapping.
-    if share_token and DEFAULT_UID_PROBE_COOKIES:
+    # For username links we can try cookie round, but only accept UID when
+    # final URL/body is consistent with the requested slug.
+    if DEFAULT_UID_PROBE_COOKIES and (share_token or slug_from_input):
         cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
 
     for cookie_source, cookie_map in cookie_rounds:
@@ -198,6 +235,14 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                     }
                 )
                 if uid_html:
+                    if cookie_source == "with_cookie" and slug_from_input:
+                        if not _is_cookie_uid_candidate_safe(
+                            slug_from_input,
+                            final_url,
+                            response.get("text"),
+                            resolved_username,
+                        ):
+                            continue
                     if share_token:
                         _uid_cache_put("share:" + share_token.lower(), uid_html, resolved_username)
                     if resolved_username:
@@ -211,6 +256,14 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                     }
 
                 if uid_final:
+                    if cookie_source == "with_cookie" and slug_from_input:
+                        if not _is_cookie_uid_candidate_safe(
+                            slug_from_input,
+                            final_url,
+                            response.get("text"),
+                            resolved_username,
+                        ):
+                            continue
                     if share_token:
                         _uid_cache_put("share:" + share_token.lower(), uid_final, resolved_username)
                     if resolved_username:
@@ -226,7 +279,7 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
     if derived_username:
         username_probe_url = "https://www.facebook.com/" + quote(derived_username)
         username_cookie_rounds = [("no_cookie", {})]
-        if share_token and DEFAULT_UID_PROBE_COOKIES:
+        if DEFAULT_UID_PROBE_COOKIES and (share_token or slug_from_input):
             username_cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
         for cookie_source, cookie_map in username_cookie_rounds:
             try:
@@ -252,6 +305,14 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                 )
                 chosen_uid = uid_html or uid_final
                 if chosen_uid:
+                    if cookie_source == "with_cookie" and slug_from_input:
+                        if not _is_cookie_uid_candidate_safe(
+                            slug_from_input,
+                            final_url,
+                            response.get("text"),
+                            derived_username or slug_from_input,
+                        ):
+                            continue
                     if share_token:
                         _uid_cache_put("share:" + share_token.lower(), chosen_uid, derived_username)
                     if derived_username:
