@@ -447,6 +447,11 @@ def enrich_profile_name_for_live_profile(
     if normalized_url:
         candidates.append(normalized_url)
     if uid:
+        if username:
+            safe_username = quote(to_text(username).strip().lstrip("@").strip("/"))
+            candidates.append(f"https://www.facebook.com/{safe_username}")
+            candidates.append(f"https://m.facebook.com/{safe_username}")
+            candidates.append(f"https://touch.facebook.com/{safe_username}")
         candidates.append(f"https://m.facebook.com/profile.php?id={uid}")
         candidates.append(f"https://touch.facebook.com/profile.php?id={uid}")
         candidates.append(f"https://www.facebook.com/profile.php?id={uid}")
