@@ -1011,6 +1011,7 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         "reason": chosen["reason"],
         "profileName": profile_name_pick["profileName"],
         "profileNameSource": profile_name_pick["profileNameSource"],
+        "nameProbeCookieConfigured": bool(DEFAULT_NAME_PROBE_COOKIES),
         "probeCount": len(probes),
         "probes": [probe.to_dict() for probe in probes],
         "elapsedMs": _now_ms() - started,
@@ -1025,6 +1026,7 @@ def root():
             "service": "bot-new-scratch-checker",
             "version": VERSION,
             "features": ["/check", "/get-uid", "/webhook/telegram"],
+            "nameProbeCookieConfigured": bool(DEFAULT_NAME_PROBE_COOKIES),
             "liveDieProbeCount": 5,
             "liveDieProbes": [
                 "graph_picture_primary",
