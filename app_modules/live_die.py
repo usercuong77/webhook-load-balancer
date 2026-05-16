@@ -348,7 +348,8 @@ def _extract_username_from_login_next(url_raw: Optional[str]) -> str:
         parsed = urlparse(url)
     except Exception:
         return ""
-    if (parsed.path or "").lower() != "/login.php":
+    login_path = (parsed.path or "").lower().rstrip("/")
+    if login_path not in ("/login.php", "/login"):
         return ""
     qs = parse_qs(parsed.query or "")
     next_url = _to_text((qs.get("next", [""])[0] or "")).strip()
@@ -581,6 +582,44 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
                     "resolvedUsername": resolved_username,
                     "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_final}",
                 }
+
+    # Last-chance fallback for share/login redirects:
+    # if we already inferred username from redirect chain, probe that profile URL directly once.
+    if derived_username:
+        username_probe_url = "https://www.facebook.com/" + quote(derived_username)
+        try:
+            response = _request_text("get", username_probe_url, fetcher=fetcher)
+            final_url = _to_text(response.get("url"))
+            uid_html = _extract_uid_from_html(response.get("text"))
+            uid_final = _extract_uid_from_url(final_url)
+            attempts.append(
+                {
+                    "url": username_probe_url,
+                    "status": int(response.get("status_code") or 0),
+                    "finalUrl": final_url,
+                    "ua": "username_direct_probe",
+                    "uidFromHtml": uid_html,
+                    "uidFromFinalUrl": uid_final,
+                }
+            )
+            chosen_uid = uid_html or uid_final
+            if chosen_uid:
+                return {
+                    "uid": chosen_uid,
+                    "source": "username_direct_probe",
+                    "attempts": attempts,
+                    "resolvedUsername": derived_username,
+                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={chosen_uid}",
+                }
+        except Exception:
+            attempts.append(
+                {
+                    "url": username_probe_url,
+                    "status": 0,
+                    "ua": "username_direct_probe",
+                    "error": "request_exception",
+                }
+            )
 
     return {
         "uid": "",
