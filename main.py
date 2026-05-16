@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-VERSION = "step06_uid_resolve_before_probe_2026_05_16"
+VERSION = "step06b_uid_resolve_debug_getuid_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
@@ -766,7 +766,7 @@ def root():
             "ok": True,
             "service": "bot-new-scratch-checker",
             "version": VERSION,
-            "features": ["/check", "/webhook/telegram"],
+            "features": ["/check", "/get-uid", "/webhook/telegram"],
             "liveDieProbeCount": 5,
             "liveDieProbes": [
                 "graph_picture_primary",
