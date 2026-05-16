@@ -615,11 +615,14 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
         if resolved_uid:
             resolve_source = "graph_username"
 
-    if not resolved_uid and input_type == "username" and username:
+    if not resolved_uid and username:
         fallback_url = "https://www.facebook.com/" + quote(username)
-        resolved_uid = _resolve_uid_from_facebook_url(fallback_url, fetcher)
+        debug_result = _resolve_uid_from_facebook_url_debug(fallback_url, fetcher)
+        resolved_uid = _to_text(debug_result.get("uid")).strip()
+        if not resolved_username:
+            resolved_username = _to_text(debug_result.get("resolvedUsername")).strip()
         if resolved_uid:
-            resolve_source = "username_probe"
+            resolve_source = _to_text(debug_result.get("source")).strip() or "username_probe"
 
     if resolved_uid:
         effective_username = username or resolved_username
