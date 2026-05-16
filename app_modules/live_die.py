@@ -340,6 +340,23 @@ def _extract_username_slug_from_url(url_raw: Optional[str]) -> str:
     return first_raw
 
 
+def _extract_username_from_login_next(url_raw: Optional[str]) -> str:
+    url = _normalize_url_input(url_raw)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    if (parsed.path or "").lower() != "/login.php":
+        return ""
+    qs = parse_qs(parsed.query or "")
+    next_url = _to_text((qs.get("next", [""])[0] or "")).strip()
+    if not next_url:
+        return ""
+    return _extract_username_slug_from_url(next_url)
+
+
 def _extract_uid_from_html(html_raw: Optional[str]) -> str:
     html = _to_text(html_raw)
     if not html:
@@ -533,7 +550,7 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
             final_url = _to_text(response.get("url"))
             uid_html = _extract_uid_from_html(response.get("text"))
             uid_final = _extract_uid_from_url(final_url)
-            resolved_username = _extract_username_slug_from_url(final_url)
+            resolved_username = _extract_username_slug_from_url(final_url) or _extract_username_from_login_next(final_url)
             attempts.append(
                 {
                     "url": probe_url,
@@ -610,13 +627,15 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
                 resolve_source = _to_text(debug_result.get("source")).strip() or "url_probe"
                 break
 
-    if not resolved_uid and username:
-        resolved_uid = _resolve_uid_from_graph_username(username, fetcher)
+    username_candidate = username or resolved_username
+
+    if not resolved_uid and username_candidate:
+        resolved_uid = _resolve_uid_from_graph_username(username_candidate, fetcher)
         if resolved_uid:
             resolve_source = "graph_username"
 
-    if not resolved_uid and username:
-        fallback_url = "https://www.facebook.com/" + quote(username)
+    if not resolved_uid and username_candidate:
+        fallback_url = "https://www.facebook.com/" + quote(username_candidate)
         debug_result = _resolve_uid_from_facebook_url_debug(fallback_url, fetcher)
         resolved_uid = _to_text(debug_result.get("uid")).strip()
         if not resolved_username:
@@ -625,7 +644,7 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
             resolve_source = _to_text(debug_result.get("source")).strip() or "username_probe"
 
     if resolved_uid:
-        effective_username = username or resolved_username
+        effective_username = username_candidate or resolved_username
         return {
             "uid": resolved_uid,
             "source": resolve_source or "resolved",
