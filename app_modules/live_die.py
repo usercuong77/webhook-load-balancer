@@ -5,11 +5,11 @@ import time
 import html as html_lib
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 
-VERSION = "step07c_profile_name_enrich_live_fallback_2026_05_16"
+VERSION = "step08_share_resolve_username_fix_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
@@ -75,6 +75,32 @@ PROFILE_NAME_BLOCKLIST = (
     "marketplace",
     "meta",
 )
+
+FACEBOOK_RESERVED_PATH_PREFIXES = {
+    "profile.php",
+    "people",
+    "share",
+    "photo",
+    "photos",
+    "posts",
+    "permalink.php",
+    "story.php",
+    "watch",
+    "reel",
+    "reels",
+    "groups",
+    "pages",
+    "events",
+    "marketplace",
+    "login",
+    "recover",
+    "checkpoint",
+    "dialog",
+    "plugins",
+    "settings",
+    "messages",
+    "notifications",
+}
 
 UID_SCRAPE_PATTERNS = (
     r'"userID"\s*:\s*"(\d{8,20})"',
@@ -228,19 +254,8 @@ def _normalize_input(raw_input: str) -> Dict:
             "profileUrl": "https://www.facebook.com/" + quote(text.lstrip("@").strip("/")),
         }
 
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-    uid = (qs.get("id") or [""])[0]
-    path_parts = [part for part in parsed.path.split("/") if part]
-    username = ""
-    if path_parts:
-        first = path_parts[0]
-        if first.lower() == "profile.php":
-            username = ""
-        elif re.fullmatch(r"\d{8,}", first):
-            uid = first
-        else:
-            username = first
+    uid = _extract_uid_from_url(url)
+    username = _extract_username_slug_from_url(url)
 
     profile_url = f"https://www.facebook.com/profile.php?id={uid}" if uid else url
     return {
@@ -294,6 +309,35 @@ def _extract_uid_from_url(url_raw: Optional[str]) -> str:
     if re.fullmatch(r"\d{8,}", parts[0]):
         return parts[0]
     return ""
+
+
+def _extract_username_slug_from_url(url_raw: Optional[str]) -> str:
+    url = _normalize_url_input(url_raw)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+
+    host = (parsed.netloc or "").lower().replace("www.", "")
+    if "facebook.com" not in host and "fb.com" not in host:
+        return ""
+
+    path = _to_text(parsed.path).strip("/")
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return ""
+
+    first_raw = unquote(_to_text(parts[0]).strip())
+    first = first_raw.lower()
+    if not first:
+        return ""
+    if first in FACEBOOK_RESERVED_PATH_PREFIXES:
+        return ""
+    if re.fullmatch(r"\d{8,20}", first_raw):
+        return ""
+    return first_raw
 
 
 def _extract_uid_from_html(html_raw: Optional[str]) -> str:
@@ -458,11 +502,17 @@ def _resolve_uid_from_graph_username(username_raw: Optional[str], fetcher: Optio
 def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> Dict:
     direct_uid = _extract_uid_from_url(url_raw)
     if direct_uid:
-        return {"uid": direct_uid, "source": "direct_url", "attempts": []}
+        return {
+            "uid": direct_uid,
+            "source": "direct_url",
+            "attempts": [],
+            "resolvedUsername": _extract_username_slug_from_url(url_raw),
+            "resolvedUrl": f"https://www.facebook.com/profile.php?id={direct_uid}",
+        }
 
     probe_urls = _build_facebook_probe_urls(url_raw)
     if not probe_urls:
-        return {"uid": "", "source": "no_probe_url", "attempts": []}
+        return {"uid": "", "source": "no_probe_url", "attempts": [], "resolvedUsername": "", "resolvedUrl": ""}
 
     attempts: List[Dict] = []
     for headers in _build_uid_probe_header_candidates():
@@ -480,25 +530,45 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
                 )
                 continue
 
+            final_url = _to_text(response.get("url"))
             uid_html = _extract_uid_from_html(response.get("text"))
-            uid_final = _extract_uid_from_url(response.get("url"))
+            uid_final = _extract_uid_from_url(final_url)
+            resolved_username = _extract_username_slug_from_url(final_url)
             attempts.append(
                 {
                     "url": probe_url,
                     "status": int(response.get("status_code") or 0),
-                    "finalUrl": _to_text(response.get("url")),
+                    "finalUrl": final_url,
                     "ua": _to_text(headers.get("User-Agent"))[:80],
                     "uidFromHtml": uid_html,
                     "uidFromFinalUrl": uid_final,
                 }
             )
             if uid_html:
-                return {"uid": uid_html, "source": "html_pattern", "attempts": attempts}
+                return {
+                    "uid": uid_html,
+                    "source": "html_pattern",
+                    "attempts": attempts,
+                    "resolvedUsername": resolved_username,
+                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_html}",
+                }
 
             if uid_final:
-                return {"uid": uid_final, "source": "final_url", "attempts": attempts}
+                return {
+                    "uid": uid_final,
+                    "source": "final_url",
+                    "attempts": attempts,
+                    "resolvedUsername": resolved_username,
+                    "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_final}",
+                }
 
-    return {"uid": "", "source": "not_found", "attempts": attempts}
+    return {
+        "uid": "",
+        "source": "not_found",
+        "attempts": attempts,
+        "resolvedUsername": _extract_username_slug_from_url(url_raw),
+        "resolvedUrl": _normalize_url_input(url_raw),
+    }
 
 
 def _resolve_uid_from_facebook_url(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
@@ -512,15 +582,32 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
     input_type = _to_text(normalized.get("inputType")).strip().lower()
 
     if uid:
-        return {"uid": uid, "source": "direct_uid", "profileUrl": f"https://www.facebook.com/profile.php?id={uid}"}
+        derived_username = username
+        canonical_url = f"https://www.facebook.com/profile.php?id={uid}"
+        if not derived_username:
+            debug_result = _resolve_uid_from_facebook_url_debug(canonical_url, fetcher)
+            derived_username = _to_text(debug_result.get("resolvedUsername")).strip()
+        return {
+            "uid": uid,
+            "source": "direct_uid",
+            "profileUrl": canonical_url,
+            "username": derived_username,
+        }
 
     resolved_uid = ""
+    resolved_username = ""
     resolve_source = ""
     if profile_url:
         for _ in range(2):
-            resolved_uid = _resolve_uid_from_facebook_url(profile_url, fetcher)
+            debug_result = _resolve_uid_from_facebook_url_debug(profile_url, fetcher)
+            resolved_uid = _to_text(debug_result.get("uid")).strip()
+            if not resolved_username:
+                resolved_username = _to_text(debug_result.get("resolvedUsername")).strip()
+            resolved_url = _to_text(debug_result.get("resolvedUrl")).strip()
+            if resolved_url:
+                profile_url = resolved_url
             if resolved_uid:
-                resolve_source = "url_probe"
+                resolve_source = _to_text(debug_result.get("source")).strip() or "url_probe"
                 break
 
     if not resolved_uid and username:
@@ -535,13 +622,20 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
             resolve_source = "username_probe"
 
     if resolved_uid:
+        effective_username = username or resolved_username
         return {
             "uid": resolved_uid,
             "source": resolve_source or "resolved",
             "profileUrl": f"https://www.facebook.com/profile.php?id={resolved_uid}",
+            "username": effective_username,
         }
 
-    return {"uid": "", "source": "uid_not_resolved", "profileUrl": profile_url}
+    return {
+        "uid": "",
+        "source": "uid_not_resolved",
+        "profileUrl": profile_url,
+        "username": username or resolved_username,
+    }
 
 
 def _get_text(
@@ -958,6 +1052,21 @@ def _enrich_profile_name_for_live_profile(
     return {"profileName": "", "profileNameSource": ""}
 
 
+def _build_profile_name_from_username_slug(username_raw: Optional[str]) -> str:
+    username = _to_text(username_raw).strip().lstrip("@").strip("/")
+    if not username:
+        return ""
+    if re.fullmatch(r"\d{8,20}", username):
+        return ""
+    normalized = re.sub(r"[._-]+", " ", username).strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    if len(normalized) < 2:
+        return ""
+    words = [word for word in normalized.split(" ") if word]
+    candidate = " ".join(word[:1].upper() + word[1:] for word in words)
+    return _clean_profile_name_candidate(candidate) if _is_valid_profile_name(candidate) else ""
+
+
 def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
     started = _now_ms()
     normalized = _normalize_input(raw_input)
@@ -976,6 +1085,8 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
     uid = _to_text(resolved.get("uid")).strip()
     uid_source = _to_text(resolved.get("source")).strip()
     profile_url = _to_text(resolved.get("profileUrl") or normalized.get("profileUrl")).strip()
+    if not username:
+        username = _to_text(resolved.get("username")).strip()
 
     probes = [
         _graph_picture_primary_probe(uid, fetcher),
@@ -991,6 +1102,10 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         enriched_name = _enrich_profile_name_for_live_profile(profile_url, uid, username, fetcher)
         if enriched_name["profileName"]:
             profile_name_pick = enriched_name
+    if not profile_name_pick["profileName"] and _to_text(chosen["status"]).lower() == "live":
+        fallback_name = _build_profile_name_from_username_slug(username)
+        if fallback_name:
+            profile_name_pick = {"profileName": fallback_name, "profileNameSource": "username_slug"}
     return {
         "ok": True,
         "version": VERSION,
