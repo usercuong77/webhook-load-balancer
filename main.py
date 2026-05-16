@@ -1356,7 +1356,17 @@ def _checker_payload() -> Dict:
         return {}
     # Keep payload strict for checker models.
     out = {}
-    for key in ("uid", "url", "proxy", "cookies", "cookiesPool", "cookies_pool"):
+    for key in (
+        "uid",
+        "url",
+        "proxy",
+        "cookies",
+        "cookiesPool",
+        "cookies_pool",
+        "latestPostMode",
+        "latest_post_mode",
+        "mode",
+    ):
         if key in payload and payload.get(key) not in (None, ""):
             out[key] = payload.get(key)
     return out
@@ -1609,7 +1619,17 @@ def _checker_auth_error_response() -> Optional[Response]:
 def _normalize_checker_batch_payload(item_raw) -> Tuple[Dict, str, str]:
     item = item_raw if isinstance(item_raw, dict) else {"input": item_raw}
     payload = {}
-    for key in ("uid", "url", "proxy", "cookies", "cookiesPool", "cookies_pool"):
+    for key in (
+        "uid",
+        "url",
+        "proxy",
+        "cookies",
+        "cookiesPool",
+        "cookies_pool",
+        "latestPostMode",
+        "latest_post_mode",
+        "mode",
+    ):
         if key in item and item.get(key) not in (None, ""):
             payload[key] = item.get(key)
 
@@ -1679,7 +1699,7 @@ def _checker_batch_items() -> Tuple[List, Dict, Optional[Response]]:
             413,
         )
     shared_payload: Dict = {}
-    for key in ("proxy", "cookies", "cookiesPool", "cookies_pool"):
+    for key in ("proxy", "cookies", "cookiesPool", "cookies_pool", "latestPostMode", "latest_post_mode", "mode"):
         value = body.get(key)
         if value not in (None, ""):
             shared_payload[key] = value
