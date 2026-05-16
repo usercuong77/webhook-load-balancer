@@ -357,31 +357,54 @@ def _resolve_uid_from_graph_username(username_raw: Optional[str], fetcher: Optio
         return ""
 
 
-def _resolve_uid_from_facebook_url(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
+def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> Dict:
     direct_uid = _extract_uid_from_url(url_raw)
     if direct_uid:
-        return direct_uid
+        return {"uid": direct_uid, "source": "direct_url", "attempts": []}
 
     probe_urls = _build_facebook_probe_urls(url_raw)
     if not probe_urls:
-        return ""
+        return {"uid": "", "source": "no_probe_url", "attempts": []}
 
+    attempts: List[Dict] = []
     for headers in _build_uid_probe_header_candidates():
         for probe_url in probe_urls:
             try:
                 response = _request_text("get", probe_url, fetcher=fetcher, headers=headers)
             except Exception:
+                attempts.append(
+                    {
+                        "url": probe_url,
+                        "status": 0,
+                        "ua": _to_text(headers.get("User-Agent"))[:80],
+                        "error": "request_exception",
+                    }
+                )
                 continue
 
             uid_html = _extract_uid_from_html(response.get("text"))
-            if uid_html:
-                return uid_html
-
             uid_final = _extract_uid_from_url(response.get("url"))
-            if uid_final:
-                return uid_final
+            attempts.append(
+                {
+                    "url": probe_url,
+                    "status": int(response.get("status_code") or 0),
+                    "finalUrl": _to_text(response.get("url")),
+                    "ua": _to_text(headers.get("User-Agent"))[:80],
+                    "uidFromHtml": uid_html,
+                    "uidFromFinalUrl": uid_final,
+                }
+            )
+            if uid_html:
+                return {"uid": uid_html, "source": "html_pattern", "attempts": attempts}
 
-    return ""
+            if uid_final:
+                return {"uid": uid_final, "source": "final_url", "attempts": attempts}
+
+    return {"uid": "", "source": "not_found", "attempts": attempts}
+
+
+def _resolve_uid_from_facebook_url(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
+    return _to_text(_resolve_uid_from_facebook_url_debug(url_raw, fetcher).get("uid")).strip()
 
 
 def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None) -> Dict:
@@ -779,6 +802,27 @@ def check_get():
         return auth_error
     raw_input = request.args.get("input") or request.args.get("url") or request.args.get("uid") or ""
     return jsonify(check_live_die(raw_input))
+
+
+@app.get("/get-uid")
+def get_uid():
+    auth_error = _require_api_key()
+    if auth_error:
+        return auth_error
+    url = request.args.get("url") or request.args.get("input") or ""
+    debug_mode = _to_text(request.args.get("debug")).strip() in ("1", "true", "on", "yes")
+    result = _resolve_uid_from_facebook_url_debug(url)
+    payload = {
+        "ok": bool(result.get("uid")),
+        "uid": _to_text(result.get("uid")),
+        "source": _to_text(result.get("source")),
+        "url": _normalize_url_input(url),
+    }
+    if not payload["ok"]:
+        payload["error"] = "uid_not_found"
+    if debug_mode:
+        payload["attempts"] = result.get("attempts") or []
+    return jsonify(payload), (200 if payload["ok"] else 404)
 
 
 @app.post("/webhook/telegram")
