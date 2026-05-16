@@ -9,14 +9,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 from app_modules.parsers.facebook_url import normalize_input as parser_normalize_input
-from app_modules.parsers.profile_name import build_profile_name_from_username_slug as parser_build_profile_name_from_username_slug
-from app_modules.probes import live_die_probes as probe_core
 from app_modules.resolvers.uid_resolver import (
     resolve_uid_for_check as resolver_resolve_uid_for_check,
     resolve_uid_from_facebook_url_debug as resolver_resolve_uid_from_facebook_url_debug,
 )
 
-VERSION = "step10_module_split_phase2_probes_2026_05_16"
+VERSION = "step09_module_split_phase1_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
@@ -1099,27 +1097,21 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         username = _to_text(resolved.get("username")).strip()
 
     probes = [
-        probe_core.graph_picture_primary_probe(uid, fetcher),
-        probe_core.graph_picture_app_token_probe(uid, fetcher),
-        probe_core.graphql_node_probe(uid, fetcher),
-        probe_core.external_checker_probe(uid, profile_url, fetcher),
-        probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher),
+        _graph_picture_primary_probe(uid, fetcher),
+        _graph_picture_app_token_probe(uid, fetcher),
+        _graphql_node_probe(uid, fetcher),
+        _external_checker_probe(uid, profile_url, fetcher),
+        _html_mobile_fallback_probe(profile_url, uid, username, fetcher),
     ]
 
-    chosen = probe_core.choose_result(probes)
-    profile_name_pick = probe_core.pick_profile_name_from_probes(probes, chosen["status"])
+    chosen = _choose_result(probes)
+    profile_name_pick = _pick_profile_name_from_probes(probes, chosen["status"])
     if not profile_name_pick["profileName"] and _to_text(chosen["status"]).lower() == "live":
-        enriched_name = probe_core.enrich_profile_name_for_live_profile(
-            profile_url,
-            uid,
-            username,
-            DEFAULT_NAME_PROBE_COOKIES,
-            fetcher,
-        )
+        enriched_name = _enrich_profile_name_for_live_profile(profile_url, uid, username, fetcher)
         if enriched_name["profileName"]:
             profile_name_pick = enriched_name
     if not profile_name_pick["profileName"] and _to_text(chosen["status"]).lower() == "live":
-        fallback_name = parser_build_profile_name_from_username_slug(username)
+        fallback_name = _build_profile_name_from_username_slug(username)
         if fallback_name:
             profile_name_pick = {"profileName": fallback_name, "profileNameSource": "username_slug"}
     return {
