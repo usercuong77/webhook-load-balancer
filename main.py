@@ -520,9 +520,11 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
     resolved_uid = ""
     resolve_source = ""
     if profile_url:
-        resolved_uid = _resolve_uid_from_facebook_url(profile_url, fetcher)
-        if resolved_uid:
-            resolve_source = "url_probe"
+        for _ in range(2):
+            resolved_uid = _resolve_uid_from_facebook_url(profile_url, fetcher)
+            if resolved_uid:
+                resolve_source = "url_probe"
+                break
 
     if not resolved_uid and username:
         resolved_uid = _resolve_uid_from_graph_username(username, fetcher)
