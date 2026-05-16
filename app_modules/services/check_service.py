@@ -21,7 +21,7 @@ from app_modules.resolvers.uid_resolver import (
 )
 
 
-VERSION = "step17_username_cookie_safe_resolve_2026_05_17"
+VERSION = "step18_username_cookie_strict_uid_2026_05_17"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:

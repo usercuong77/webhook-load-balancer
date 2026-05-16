@@ -47,6 +47,17 @@ UID_SCRAPE_PATTERNS = (
     r"fb://profile/(\d{8,20})",
 )
 
+UID_SCRAPE_PATTERNS_STRICT = (
+    r'<meta[^>]+property=["\']al:ios:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']al:android:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']al:web:url["\'][^>]+content=["\']fb:\/\/profile\/(\d{8,20})["\']',
+    r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https?:\/\/(?:www\.)?facebook\.com\/profile\.php\?id=(\d{8,20})',
+    r'"profile_owner"\s*:\s*"(\d{8,20})"',
+    r'"owner"\s*:\s*\{\s*"id"\s*:\s*"(\d{8,20})"',
+    r'profile\.php\?id=(\d{8,20})',
+    r"fb://profile/(\d{8,20})",
+)
+
 
 def to_text(value) -> str:
     return "" if value is None else str(value)
@@ -225,6 +236,26 @@ def extract_uid_from_html(html_raw: Optional[str]) -> str:
         .replace("&quot;", '"')
     )
     for pattern in UID_SCRAPE_PATTERNS:
+        match = re.search(pattern, normalized, flags=re.I)
+        if not match:
+            continue
+        uid = to_text(match.group(1) if match.groups() else "").strip()
+        if re.fullmatch(r"\d{8,20}", uid):
+            return uid
+    return ""
+
+
+def extract_uid_from_html_strict(html_raw: Optional[str]) -> str:
+    html = to_text(html_raw)
+    if not html:
+        return ""
+    normalized = normalize_facebook_payload_text(
+        html.replace("\\/", "/")
+        .replace("\\u002f", "/")
+        .replace("\\u003a", ":")
+        .replace("&quot;", '"')
+    )
+    for pattern in UID_SCRAPE_PATTERNS_STRICT:
         match = re.search(pattern, normalized, flags=re.I)
         if not match:
             continue

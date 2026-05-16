@@ -11,6 +11,7 @@ from app_modules.parsers.facebook_url import (
     build_uid_probe_header_candidates,
     extract_share_token,
     extract_uid_from_html,
+    extract_uid_from_html_strict,
     extract_uid_from_url,
     extract_username_from_login_next,
     extract_username_slug_from_url,
@@ -215,7 +216,11 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                     continue
 
                 final_url = to_text(response.get("url"))
-                uid_html = extract_uid_from_html(response.get("text"))
+                response_text = response.get("text")
+                uid_html = extract_uid_from_html(response_text)
+                if cookie_source == "with_cookie" and slug_from_input:
+                    strict_uid = extract_uid_from_html_strict(response_text)
+                    uid_html = strict_uid or ""
                 uid_final = extract_uid_from_url(final_url)
                 resolved_username = extract_username_slug_from_url(final_url) or extract_username_from_login_next(final_url)
                 if slug_from_input and resolved_username:
@@ -239,7 +244,7 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                         if not _is_cookie_uid_candidate_safe(
                             slug_from_input,
                             final_url,
-                            response.get("text"),
+                            response_text,
                             resolved_username,
                         ):
                             continue
@@ -260,7 +265,7 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                         if not _is_cookie_uid_candidate_safe(
                             slug_from_input,
                             final_url,
-                            response.get("text"),
+                            response_text,
                             resolved_username,
                         ):
                             continue
@@ -290,7 +295,11 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                     cookies=cookie_map or None,
                 )
                 final_url = to_text(response.get("url"))
-                uid_html = extract_uid_from_html(response.get("text"))
+                response_text = response.get("text")
+                uid_html = extract_uid_from_html(response_text)
+                if cookie_source == "with_cookie" and slug_from_input:
+                    strict_uid = extract_uid_from_html_strict(response_text)
+                    uid_html = strict_uid or ""
                 uid_final = extract_uid_from_url(final_url)
                 attempts.append(
                     {
@@ -309,7 +318,7 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                         if not _is_cookie_uid_candidate_safe(
                             slug_from_input,
                             final_url,
-                            response.get("text"),
+                            response_text,
                             derived_username or slug_from_input,
                         ):
                             continue
