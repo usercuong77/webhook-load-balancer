@@ -98,6 +98,40 @@ def _is_cookie_uid_candidate_safe(
     return False
 
 
+def _verify_uid_matches_slug_with_cookie(
+    uid_raw: Optional[str],
+    slug_raw: Optional[str],
+    cookie_map: Optional[Dict[str, str]],
+    fetcher: Optional[Callable] = None,
+) -> bool:
+    uid = normalize_uid(uid_raw)
+    slug = to_text(slug_raw).strip().lower()
+    cookies = cookie_map if isinstance(cookie_map, dict) else {}
+    if not uid or not slug or not cookies:
+        return False
+    probe_url = f"https://www.facebook.com/profile.php?id={uid}"
+    try:
+        response = request_text(
+            "get",
+            probe_url,
+            fetcher=fetcher,
+            headers={"User-Agent": "Mozilla/5.0"},
+            cookies=cookies,
+        )
+    except Exception:
+        return False
+    final_url = to_text(response.get("url"))
+    if _is_login_like_url(final_url):
+        return False
+    canonical_slug = extract_username_slug_from_url(final_url) or extract_username_from_login_next(final_url)
+    canonical_slug = to_text(canonical_slug).strip().lower()
+    if canonical_slug:
+        return canonical_slug == slug
+    # If canonical URL doesn't expose slug, fallback to HTML reference check.
+    body_lower = to_text(response.get("text")).lower()
+    return ("/" + slug) in body_lower
+
+
 def _uid_cache_get(cache_key_raw: Optional[str]) -> Optional[Dict[str, str]]:
     cache_key = to_text(cache_key_raw).strip().lower()
     if not cache_key:
@@ -248,6 +282,13 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                             resolved_username,
                         ):
                             continue
+                        if not _verify_uid_matches_slug_with_cookie(
+                            uid_html,
+                            slug_from_input,
+                            cookie_map,
+                            fetcher,
+                        ):
+                            continue
                     if share_token:
                         _uid_cache_put("share:" + share_token.lower(), uid_html, resolved_username)
                     if resolved_username:
@@ -267,6 +308,13 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                             final_url,
                             response_text,
                             resolved_username,
+                        ):
+                            continue
+                        if not _verify_uid_matches_slug_with_cookie(
+                            uid_final,
+                            slug_from_input,
+                            cookie_map,
+                            fetcher,
                         ):
                             continue
                     if share_token:
@@ -320,6 +368,13 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                             final_url,
                             response_text,
                             derived_username or slug_from_input,
+                        ):
+                            continue
+                        if not _verify_uid_matches_slug_with_cookie(
+                            chosen_uid,
+                            slug_from_input,
+                            cookie_map,
+                            fetcher,
                         ):
                             continue
                     if share_token:
