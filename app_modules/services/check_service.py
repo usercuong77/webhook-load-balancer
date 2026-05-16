@@ -21,7 +21,7 @@ from app_modules.resolvers.uid_resolver import (
 )
 
 
-VERSION = "step19_cookie_uid_slug_verify_2026_05_17"
+VERSION = "step20_no_forced_dead_when_uid_missing_2026_05_17"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
@@ -143,6 +143,15 @@ def _force_binary_status(
     if current_status in ("live", "dead"):
         return chosen
 
+    if not to_text(uid).strip():
+        return {
+            "status": "unknown",
+            "confidence": "weak",
+            "source": to_text(chosen.get("source")) or "binary_guard_uid_missing",
+            "httpStatus": int(chosen.get("httpStatus") or 0),
+            "reason": "uid_unresolved_no_strong_signal:" + to_text(chosen.get("reason") or "no_stable_signal"),
+        }
+
     fallback_probe = probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
     if fallback_probe.status in ("live", "dead"):
         return {
@@ -165,11 +174,11 @@ def _force_binary_status(
             }
 
     return {
-        "status": "dead",
+        "status": "unknown",
         "confidence": "weak",
-        "source": to_text(chosen.get("source")) or "binary_fallback_forced_dead",
+        "source": to_text(chosen.get("source")) or "binary_fallback_unknown",
         "httpStatus": int(chosen.get("httpStatus") or 0),
-        "reason": "binary_forced_dead:" + to_text(chosen.get("reason") or "no_stable_signal"),
+        "reason": "binary_unknown:" + to_text(chosen.get("reason") or "no_stable_signal"),
     }
 
 
