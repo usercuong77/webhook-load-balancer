@@ -30,8 +30,17 @@ LIVE_MARKERS = (
     "about",
     "friends",
     "photos",
+    "\"entity_id\"",
+    "\"userid\"",
+    "\"profile_id\"",
+)
+
+AUTH_WALL_MARKERS = (
     "log in to facebook",
     "join facebook to connect",
+    "log in or sign up",
+    "you must log in",
+    "login.php",
 )
 
 HTML_PROBE_USER_AGENT = "Mozilla/5.0"
@@ -86,9 +95,17 @@ def public_profile_probe(
         return ProbeResult(name, "unknown", "weak", http_status, "server_error", response["url"], profile_name)
 
     if http_status in (200, 301, 302):
-        if any(marker in body for marker in LIVE_MARKERS):
-            return ProbeResult(name, "live", "weak", http_status, "live_marker_or_auth_wall", response["url"], profile_name)
-        return ProbeResult(name, "live", "weak", http_status, "http_ok_no_dead_marker", response["url"], profile_name)
+        # HTML probe is noisy on Facebook auth/login wall. Only return LIVE when
+        # we have explicit profile signals or a valid extracted profile name.
+        has_auth_wall = any(marker in body for marker in AUTH_WALL_MARKERS)
+        has_live_marker = any(marker in body for marker in LIVE_MARKERS)
+        if is_valid_profile_name(profile_name):
+            return ProbeResult(name, "live", "weak", http_status, "profile_name_signal", response["url"], profile_name)
+        if has_auth_wall:
+            return ProbeResult(name, "unknown", "weak", http_status, "auth_wall_marker", response["url"], profile_name)
+        if has_live_marker:
+            return ProbeResult(name, "live", "weak", http_status, "live_marker", response["url"], profile_name)
+        return ProbeResult(name, "unknown", "weak", http_status, "http_ok_no_strong_signal", response["url"], profile_name)
 
     return ProbeResult(name, "unknown", "weak", http_status, "unclassified_http", response["url"], profile_name)
 
