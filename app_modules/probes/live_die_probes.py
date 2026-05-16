@@ -34,6 +34,8 @@ LIVE_MARKERS = (
     "join facebook to connect",
 )
 
+HTML_PROBE_USER_AGENT = "Mozilla/5.0"
+
 
 @dataclass
 class ProbeResult:
@@ -64,7 +66,9 @@ def public_profile_probe(
     cookies: Optional[Dict[str, str]] = None,
 ) -> ProbeResult:
     try:
-        response = get_text(url, fetcher, cookies=cookies)
+        # Facebook can return HTTP 400 for modern Chrome-like UA on public profile HTML.
+        # Use a conservative UA for HTML probes so we can still extract profile name/title.
+        response = get_text(url, fetcher, headers={"User-Agent": HTML_PROBE_USER_AGENT}, cookies=cookies)
     except Exception as exc:
         return ProbeResult(name, "unknown", "weak", 0, f"fetch_error:{exc}", url)
 
@@ -258,17 +262,77 @@ def external_checker_probe(uid: str, profile_url: str, fetcher: Optional[Callabl
 
 def html_mobile_fallback_probe(profile_url: str, uid: str, username: str, fetcher: Optional[Callable] = None) -> ProbeResult:
     public_probe = public_profile_probe("html_public", profile_url, fetcher)
+    if public_probe.status in ("live", "dead") and is_valid_profile_name(public_probe.profile_name):
+        return ProbeResult(
+            "html_mobile_fallback",
+            public_probe.status,
+            public_probe.confidence,
+            public_probe.http_status,
+            "public_name_signal:" + public_probe.reason,
+            public_probe.url,
+            public_probe.profile_name,
+        )
     if public_probe.status == "dead" and public_probe.confidence == "strong":
-        return ProbeResult("html_mobile_fallback", public_probe.status, public_probe.confidence, public_probe.http_status, public_probe.reason, public_probe.url)
+        return ProbeResult(
+            "html_mobile_fallback",
+            public_probe.status,
+            public_probe.confidence,
+            public_probe.http_status,
+            public_probe.reason,
+            public_probe.url,
+            public_probe.profile_name,
+        )
     if public_probe.status == "live" and public_probe.confidence == "strong":
-        return ProbeResult("html_mobile_fallback", public_probe.status, public_probe.confidence, public_probe.http_status, public_probe.reason, public_probe.url)
+        return ProbeResult(
+            "html_mobile_fallback",
+            public_probe.status,
+            public_probe.confidence,
+            public_probe.http_status,
+            public_probe.reason,
+            public_probe.url,
+            public_probe.profile_name,
+        )
 
     mobile_probe = public_profile_probe("html_mobile", _mobile_url(profile_url, uid, username), fetcher)
+    if mobile_probe.status in ("live", "dead") and is_valid_profile_name(mobile_probe.profile_name):
+        return ProbeResult(
+            "html_mobile_fallback",
+            mobile_probe.status,
+            mobile_probe.confidence,
+            mobile_probe.http_status,
+            "mobile_name_signal:" + mobile_probe.reason,
+            mobile_probe.url,
+            mobile_probe.profile_name,
+        )
     if mobile_probe.status in ("live", "dead"):
-        return ProbeResult("html_mobile_fallback", mobile_probe.status, mobile_probe.confidence, mobile_probe.http_status, "mobile:" + mobile_probe.reason, mobile_probe.url)
+        return ProbeResult(
+            "html_mobile_fallback",
+            mobile_probe.status,
+            mobile_probe.confidence,
+            mobile_probe.http_status,
+            "mobile:" + mobile_probe.reason,
+            mobile_probe.url,
+            mobile_probe.profile_name,
+        )
     if public_probe.status in ("live", "dead"):
-        return ProbeResult("html_mobile_fallback", public_probe.status, public_probe.confidence, public_probe.http_status, "public:" + public_probe.reason, public_probe.url)
-    return ProbeResult("html_mobile_fallback", "unknown", "weak", public_probe.http_status or mobile_probe.http_status, "html_mobile_uncertain", profile_url)
+        return ProbeResult(
+            "html_mobile_fallback",
+            public_probe.status,
+            public_probe.confidence,
+            public_probe.http_status,
+            "public:" + public_probe.reason,
+            public_probe.url,
+            public_probe.profile_name,
+        )
+    return ProbeResult(
+        "html_mobile_fallback",
+        "unknown",
+        "weak",
+        public_probe.http_status or mobile_probe.http_status,
+        "html_mobile_uncertain",
+        profile_url,
+        public_probe.profile_name or mobile_probe.profile_name,
+    )
 
 
 def choose_result(probes: List[ProbeResult]) -> Dict:

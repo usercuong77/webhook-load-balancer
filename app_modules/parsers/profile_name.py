@@ -1,5 +1,6 @@
 import html as html_lib
 import re
+import unicodedata
 from typing import Optional
 
 
@@ -21,7 +22,6 @@ PROFILE_NAME_BLOCKLIST = (
     "notifications",
     "watch",
     "marketplace",
-    "meta",
 )
 
 
@@ -37,13 +37,23 @@ def clean_profile_name_candidate(raw_name: Optional[str]) -> str:
     return re.sub(r"\s+", " ", name).strip()
 
 
+def _latin_fold(raw: Optional[str]) -> str:
+    text = "" if raw is None else str(raw)
+    text = text.replace("đ", "d").replace("Đ", "D")
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
 def is_valid_profile_name(raw_name: Optional[str]) -> bool:
     name = clean_profile_name_candidate(raw_name)
     if len(name) < 2 or len(name) > 90:
         return False
     low = name.lower()
+    low_folded = _latin_fold(low)
     for marker in PROFILE_NAME_BLOCKLIST:
-        if marker in low:
+        marker_low = marker.lower()
+        marker_folded = _latin_fold(marker_low)
+        if marker_low in low or marker_folded in low_folded:
             return False
     return any(ch.isalpha() for ch in name)
 
