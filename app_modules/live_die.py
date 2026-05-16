@@ -180,6 +180,9 @@ def _load_default_name_probe_cookies() -> Dict[str, str]:
 
 
 DEFAULT_NAME_PROBE_COOKIES = _load_default_name_probe_cookies()
+UID_RESOLVE_CACHE_TTL_SEC = max(60, int(os.getenv("UID_RESOLVE_CACHE_TTL_SEC", "21600")))
+UID_RESOLVE_CACHE_MAX_ITEMS = max(100, int(os.getenv("UID_RESOLVE_CACHE_MAX_ITEMS", "2000")))
+_UID_RESOLVE_CACHE: Dict[str, Dict[str, str]] = {}
 
 
 def _clean_profile_name_candidate(raw_name: Optional[str]) -> str:
@@ -192,6 +195,40 @@ def _clean_profile_name_candidate(raw_name: Optional[str]) -> str:
     name = re.sub(r"\s*-\s*facebook.*$", "", name, flags=re.I)
     name = re.sub(r"\s*·\s*facebook.*$", "", name, flags=re.I)
     return re.sub(r"\s+", " ", name).strip()
+
+
+def _uid_cache_get(cache_key_raw: Optional[str]) -> Optional[Dict[str, str]]:
+    cache_key = _to_text(cache_key_raw).strip().lower()
+    if not cache_key:
+        return None
+    item = _UID_RESOLVE_CACHE.get(cache_key)
+    if not item:
+        return None
+    expires_at = int(item.get("expiresAt") or 0)
+    if expires_at and expires_at < int(time.time()):
+        _UID_RESOLVE_CACHE.pop(cache_key, None)
+        return None
+    uid = _normalize_uid(item.get("uid"))
+    if not uid:
+        _UID_RESOLVE_CACHE.pop(cache_key, None)
+        return None
+    return {"uid": uid, "username": _to_text(item.get("username")).strip()}
+
+
+def _uid_cache_put(cache_key_raw: Optional[str], uid_raw: Optional[str], username_raw: Optional[str] = "") -> None:
+    cache_key = _to_text(cache_key_raw).strip().lower()
+    uid = _normalize_uid(uid_raw)
+    if not cache_key or not uid:
+        return
+    _UID_RESOLVE_CACHE[cache_key] = {
+        "uid": uid,
+        "username": _to_text(username_raw).strip(),
+        "expiresAt": str(int(time.time()) + UID_RESOLVE_CACHE_TTL_SEC),
+    }
+    if len(_UID_RESOLVE_CACHE) > UID_RESOLVE_CACHE_MAX_ITEMS:
+        # Drop oldest-like entries by simple bounded shrink (good enough for in-memory cache).
+        for key in list(_UID_RESOLVE_CACHE.keys())[: len(_UID_RESOLVE_CACHE) - UID_RESOLVE_CACHE_MAX_ITEMS]:
+            _UID_RESOLVE_CACHE.pop(key, None)
 
 
 def _is_valid_profile_name(raw_name: Optional[str]) -> bool:
@@ -338,6 +375,24 @@ def _extract_username_slug_from_url(url_raw: Optional[str]) -> str:
     if re.fullmatch(r"\d{8,20}", first_raw):
         return ""
     return first_raw
+
+
+def _extract_share_token(url_raw: Optional[str]) -> str:
+    url = _normalize_url_input(url_raw)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    path = _to_text(parsed.path).strip("/")
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return ""
+    if parts[0].lower() != "share":
+        return ""
+    token = _to_text(parts[1]).strip()
+    return token if token else ""
 
 
 def _extract_username_from_login_next(url_raw: Optional[str]) -> str:
@@ -518,8 +573,38 @@ def _resolve_uid_from_graph_username(username_raw: Optional[str], fetcher: Optio
 
 
 def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> Dict:
+    normalized_url = _normalize_url_input(url_raw)
+    share_token = _extract_share_token(normalized_url)
+    if share_token:
+        cached_share = _uid_cache_get("share:" + share_token.lower())
+        if cached_share:
+            cached_uid = _normalize_uid(cached_share.get("uid"))
+            cached_username = _to_text(cached_share.get("username")).strip()
+            return {
+                "uid": cached_uid,
+                "source": "share_cache",
+                "attempts": [],
+                "resolvedUsername": cached_username,
+                "resolvedUrl": f"https://www.facebook.com/profile.php?id={cached_uid}",
+            }
+
+    slug_from_input = _extract_username_slug_from_url(normalized_url)
+    if slug_from_input:
+        cached_username = _uid_cache_get("username:" + slug_from_input.lower())
+        if cached_username:
+            cached_uid = _normalize_uid(cached_username.get("uid"))
+            return {
+                "uid": cached_uid,
+                "source": "username_cache",
+                "attempts": [],
+                "resolvedUsername": slug_from_input,
+                "resolvedUrl": f"https://www.facebook.com/profile.php?id={cached_uid}",
+            }
+
     direct_uid = _extract_uid_from_url(url_raw)
     if direct_uid:
+        if share_token:
+            _uid_cache_put("share:" + share_token.lower(), direct_uid)
         return {
             "uid": direct_uid,
             "source": "direct_url",
@@ -566,6 +651,10 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
                 }
             )
             if uid_html:
+                if share_token:
+                    _uid_cache_put("share:" + share_token.lower(), uid_html, resolved_username)
+                if resolved_username:
+                    _uid_cache_put("username:" + resolved_username.lower(), uid_html, resolved_username)
                 return {
                     "uid": uid_html,
                     "source": "html_pattern",
@@ -575,6 +664,10 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
                 }
 
             if uid_final:
+                if share_token:
+                    _uid_cache_put("share:" + share_token.lower(), uid_final, resolved_username)
+                if resolved_username:
+                    _uid_cache_put("username:" + resolved_username.lower(), uid_final, resolved_username)
                 return {
                     "uid": uid_final,
                     "source": "final_url",
@@ -604,6 +697,10 @@ def _resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Option
             )
             chosen_uid = uid_html or uid_final
             if chosen_uid:
+                if share_token:
+                    _uid_cache_put("share:" + share_token.lower(), chosen_uid, derived_username)
+                if derived_username:
+                    _uid_cache_put("username:" + derived_username.lower(), chosen_uid, derived_username)
                 return {
                     "uid": chosen_uid,
                     "source": "username_direct_probe",
@@ -638,7 +735,7 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
     uid = _normalize_uid(normalized.get("uid"))
     username = _to_text(normalized.get("username")).strip()
     profile_url = _to_text(normalized.get("profileUrl")).strip()
-    input_type = _to_text(normalized.get("inputType")).strip().lower()
+    share_token = _extract_share_token(profile_url)
 
     if uid:
         derived_username = username
@@ -646,6 +743,10 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
         if not derived_username:
             debug_result = _resolve_uid_from_facebook_url_debug(canonical_url, fetcher)
             derived_username = _to_text(debug_result.get("resolvedUsername")).strip()
+        if share_token:
+            _uid_cache_put("share:" + share_token.lower(), uid, derived_username)
+        if derived_username:
+            _uid_cache_put("username:" + derived_username.lower(), uid, derived_username)
         return {
             "uid": uid,
             "source": "direct_uid",
@@ -687,6 +788,10 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
 
     if resolved_uid:
         effective_username = username_candidate or resolved_username
+        if share_token:
+            _uid_cache_put("share:" + share_token.lower(), resolved_uid, effective_username)
+        if effective_username:
+            _uid_cache_put("username:" + effective_username.lower(), resolved_uid, effective_username)
         return {
             "uid": resolved_uid,
             "source": resolve_source or "resolved",
