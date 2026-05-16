@@ -21,7 +21,7 @@ from app_modules.resolvers.uid_resolver import (
 )
 
 
-VERSION = "step14_uid_share_resolve_binary_modes_2026_05_16"
+VERSION = "step15_uid_cache_safety_2026_05_16"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
