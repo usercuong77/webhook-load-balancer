@@ -8,13 +8,8 @@ from typing import Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
-from app_modules.parsers.facebook_url import normalize_input as parser_normalize_input
-from app_modules.resolvers.uid_resolver import (
-    resolve_uid_for_check as resolver_resolve_uid_for_check,
-    resolve_uid_from_facebook_url_debug as resolver_resolve_uid_from_facebook_url_debug,
-)
 
-VERSION = "step09_module_split_phase1_2026_05_16"
+VERSION = "step08_share_resolve_username_fix_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
@@ -1077,7 +1072,7 @@ def _build_profile_name_from_username_slug(username_raw: Optional[str]) -> str:
 
 def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
     started = _now_ms()
-    normalized = parser_normalize_input(raw_input)
+    normalized = _normalize_input(raw_input)
     if not normalized.get("ok"):
         return {
             "ok": False,
@@ -1089,7 +1084,7 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         }
 
     username = normalized.get("username", "")
-    resolved = resolver_resolve_uid_for_check(normalized, fetcher)
+    resolved = _resolve_uid_for_check(normalized, fetcher)
     uid = _to_text(resolved.get("uid")).strip()
     uid_source = _to_text(resolved.get("source")).strip()
     profile_url = _to_text(resolved.get("profileUrl") or normalized.get("profileUrl")).strip()
@@ -1172,7 +1167,7 @@ def check_from_query(query: Dict) -> Dict:
 
 
 def get_uid_payload(url: str, debug_mode: bool = False) -> Dict:
-    result = resolver_resolve_uid_from_facebook_url_debug(url)
+    result = _resolve_uid_from_facebook_url_debug(url)
     payload = {
         "ok": bool(result.get("uid")),
         "uid": _to_text(result.get("uid")),
