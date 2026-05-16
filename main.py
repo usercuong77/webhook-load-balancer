@@ -70,6 +70,7 @@ FALLBACK_UID_PROBE_USER_AGENTS = (
     USER_AGENT,
     "Mozilla/5.0",
     "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 )
 
 
@@ -201,7 +202,7 @@ def _extract_uid_from_html(html_raw: Optional[str]) -> str:
     html = _to_text(html_raw)
     if not html:
         return ""
-    normalized = (
+    normalized = _normalize_facebook_payload_text(
         html.replace("\\/", "/")
         .replace("\\u002f", "/")
         .replace("\\u003a", ":")
@@ -217,6 +218,81 @@ def _extract_uid_from_html(html_raw: Optional[str]) -> str:
     return ""
 
 
+def _safe_percent_decode_text(value_raw: Optional[str], rounds_raw: int = 1) -> str:
+    value = _to_text(value_raw)
+    if not value:
+        return ""
+    rounds = max(1, min(3, int(rounds_raw or 1)))
+    for _ in range(rounds):
+        next_value = re.sub(r"%([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), value)
+        if next_value == value:
+            break
+        value = next_value
+    return value
+
+
+def _normalize_facebook_payload_text(raw: Optional[str]) -> str:
+    normalized = (
+        _to_text(raw)
+        .replace("\\/", "/")
+        .replace("\\u002f", "/")
+        .replace("\\u003a", ":")
+        .replace("\\u003d", "=")
+        .replace("\\u0026", "&")
+        .replace("\\u003f", "?")
+        .replace("\\x2f", "/")
+        .replace("\\x3a", ":")
+        .replace("\\x3d", "=")
+        .replace("\\x26", "&")
+        .replace("\\x3f", "?")
+        .replace("&#x2f;", "/")
+        .replace("&#x3a;", ":")
+        .replace("&#x3d;", "=")
+        .replace("&#x26;", "&")
+        .replace("&#x3f;", "?")
+        .replace("&#47;", "/")
+        .replace("&#58;", ":")
+        .replace("&#61;", "=")
+        .replace("&#38;", "&")
+        .replace("&#63;", "?")
+        .replace("&amp;", "&")
+        .replace("%253d", "%3d")
+        .replace("%253D", "%3D")
+        .replace("%2526", "%26")
+        .replace("%253f", "%3f")
+        .replace("%253F", "%3F")
+        .replace("%3d", "=")
+        .replace("%3D", "=")
+        .replace("%26", "&")
+        .replace("%3f", "?")
+        .replace("%3F", "?")
+        .replace("&quot;", '"')
+    )
+    return _safe_percent_decode_text(normalized, 2)
+
+
+def _build_facebook_navigation_hint_headers(user_agent_raw: Optional[str]) -> Dict[str, str]:
+    user_agent = _to_text(user_agent_raw).lower()
+    platform = '"Windows"'
+    mobile = "?0"
+    if "android" in user_agent:
+        platform = '"Android"'
+        mobile = "?1"
+    elif "iphone" in user_agent or "ipad" in user_agent or "ios" in user_agent:
+        platform = '"iOS"'
+        mobile = "?1"
+    return {
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "sec-ch-ua": '"Chromium";v="140", "Not.A/Brand";v="24", "Google Chrome";v="140"',
+        "sec-ch-ua-mobile": mobile,
+        "sec-ch-ua-platform": platform,
+        "Cache-Control": "max-age=0",
+    }
+
+
 def _build_facebook_probe_urls(url_raw: Optional[str]) -> List[str]:
     normalized = _normalize_url_input(url_raw)
     if not normalized:
@@ -229,6 +305,7 @@ def _build_facebook_probe_urls(url_raw: Optional[str]) -> List[str]:
             path = parsed.path or "/"
             query = ("?" + parsed.query) if parsed.query else ""
             urls.append(f"https://m.facebook.com{path}{query}")
+            urls.append(f"https://mbasic.facebook.com{path}{query}")
             urls.append(f"https://www.facebook.com{path}{query}")
     except Exception:
         pass
@@ -255,7 +332,9 @@ def _build_uid_probe_header_candidates() -> List[Dict[str, str]]:
         if low in seen:
             continue
         seen.add(low)
-        out.append({"User-Agent": key, "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"})
+        headers = {"User-Agent": key, "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"}
+        headers.update(_build_facebook_navigation_hint_headers(key))
+        out.append(headers)
     return out
 
 
