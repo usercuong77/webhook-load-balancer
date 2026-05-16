@@ -17,6 +17,11 @@ FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
 EXTERNAL_CHECKER_API_KEY = os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
 UID_CHECKER_API_KEY = os.getenv("UID_CHECKER_API_KEY", "").strip()
+TELEGRAM_RELAY_TARGET_URL = os.getenv(
+    "TELEGRAM_RELAY_TARGET_URL",
+    "https://script.google.com/macros/s/AKfycbyfgY-Dt5vmus2nbCROMIsNOWN0ddDKDnYTaYrQY2SdeUdlMrsCjOnLujB4h7OK3x8/exec",
+).strip()
+TELEGRAM_RELAY_TIMEOUT_SEC = float(os.getenv("TELEGRAM_RELAY_TIMEOUT_SEC", "25"))
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -449,7 +454,7 @@ def root():
             "ok": True,
             "service": "bot-new-scratch-checker",
             "version": VERSION,
-            "features": ["/check"],
+            "features": ["/check", "/webhook/telegram"],
             "liveDieProbeCount": 5,
             "liveDieProbes": [
                 "graph_picture_primary",
@@ -458,6 +463,7 @@ def root():
                 "external_checker",
                 "html_mobile_fallback",
             ],
+            "telegramRelayConfigured": bool(TELEGRAM_RELAY_TARGET_URL),
         }
     )
 
@@ -484,6 +490,39 @@ def check_get():
         return auth_error
     raw_input = request.args.get("input") or request.args.get("url") or request.args.get("uid") or ""
     return jsonify(check_live_die(raw_input))
+
+
+@app.post("/webhook/telegram")
+def webhook_telegram():
+    if not TELEGRAM_RELAY_TARGET_URL:
+        return jsonify({"ok": False, "error": "telegram_relay_target_missing"}), 500
+
+    body = request.get_data() or b"{}"
+    content_type = request.headers.get("Content-Type", "application/json")
+    try:
+        upstream = requests.post(
+            TELEGRAM_RELAY_TARGET_URL,
+            data=body,
+            headers={"Content-Type": content_type},
+            timeout=TELEGRAM_RELAY_TIMEOUT_SEC,
+            allow_redirects=True,
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"telegram_relay_exception:{exc}"}), 502
+
+    if 200 <= upstream.status_code < 300:
+        return jsonify({"ok": True, "accepted": True, "upstreamStatus": upstream.status_code})
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "telegram_relay_upstream_failed",
+                "upstreamStatus": upstream.status_code,
+                "upstreamBody": (upstream.text or "")[:500],
+            }
+        ),
+        502,
+    )
 
 
 def _require_api_key():
