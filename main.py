@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-VERSION = "step02_five_live_die_modes_2026_05_16"
+VERSION = "step06_uid_resolve_before_probe_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
@@ -54,6 +54,22 @@ DEFAULT_AVATAR_MARKERS = (
     "profile/default",
     "silhouette",
     "q_silhouette",
+)
+
+UID_SCRAPE_PATTERNS = (
+    r'"userID"\s*:\s*"(\d{8,20})"',
+    r'"profile_id"\s*:\s*(\d{8,20})',
+    r'"entity_id"\s*:\s*"(\d{8,20})"',
+    r'"actorID"\s*:\s*"(\d{8,20})"',
+    r'"subject_id"\s*:\s*"(\d{8,20})"',
+    r'profile\.php\?id=(\d{8,20})',
+    r'fb://profile/(\d{8,20})',
+)
+
+FALLBACK_UID_PROBE_USER_AGENTS = (
+    USER_AGENT,
+    "Mozilla/5.0",
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
 )
 
 
@@ -135,6 +151,195 @@ def _normalize_input(raw_input: str) -> Dict:
         "username": username,
         "profileUrl": profile_url,
     }
+
+
+def _normalize_url_input(raw: Optional[str]) -> str:
+    value = _to_text(raw).strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return "https://" + value
+
+
+def _normalize_uid(uid_raw: Optional[str]) -> str:
+    uid = _to_text(uid_raw).strip()
+    return uid if re.fullmatch(r"\d{8,}", uid) else ""
+
+
+def _extract_uid_from_url(url_raw: Optional[str]) -> str:
+    url = _normalize_url_input(url_raw)
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+
+    host = (parsed.netloc or "").lower().replace("www.", "")
+    if "facebook.com" not in host and "fb.com" not in host:
+        return ""
+
+    qs = parse_qs(parsed.query or "")
+    profile_id = _to_text((qs.get("id", [""])[0] or "")).strip()
+    if re.fullmatch(r"\d{8,}", profile_id):
+        return profile_id
+
+    path = _to_text(parsed.path).strip("/")
+    parts = [p for p in path.split("/") if p]
+    if not parts:
+        return ""
+
+    if parts[0].lower() == "people" and len(parts) >= 3 and re.fullmatch(r"\d{8,}", parts[2]):
+        return parts[2]
+    if re.fullmatch(r"\d{8,}", parts[0]):
+        return parts[0]
+    return ""
+
+
+def _extract_uid_from_html(html_raw: Optional[str]) -> str:
+    html = _to_text(html_raw)
+    if not html:
+        return ""
+    normalized = (
+        html.replace("\\/", "/")
+        .replace("\\u002f", "/")
+        .replace("\\u003a", ":")
+        .replace("&quot;", '"')
+    )
+    for pattern in UID_SCRAPE_PATTERNS:
+        match = re.search(pattern, normalized, flags=re.I)
+        if not match:
+            continue
+        uid = _to_text(match.group(1) if match.groups() else "").strip()
+        if re.fullmatch(r"\d{8,20}", uid):
+            return uid
+    return ""
+
+
+def _build_facebook_probe_urls(url_raw: Optional[str]) -> List[str]:
+    normalized = _normalize_url_input(url_raw)
+    if not normalized:
+        return []
+    urls: List[str] = [normalized]
+    try:
+        parsed = urlparse(normalized)
+        host = (parsed.netloc or "").lower()
+        if "facebook.com" in host or "fb.com" in host:
+            path = parsed.path or "/"
+            query = ("?" + parsed.query) if parsed.query else ""
+            urls.append(f"https://m.facebook.com{path}{query}")
+            urls.append(f"https://www.facebook.com{path}{query}")
+    except Exception:
+        pass
+
+    out: List[str] = []
+    seen = set()
+    for item in urls:
+        key = _to_text(item).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def _build_uid_probe_header_candidates() -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    seen = set()
+    for ua in FALLBACK_UID_PROBE_USER_AGENTS:
+        key = _to_text(ua).strip()
+        if not key:
+            continue
+        low = key.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append({"User-Agent": key, "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"})
+    return out
+
+
+def _resolve_uid_from_graph_username(username_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
+    username = _to_text(username_raw).strip().lstrip("@").strip("/")
+    if not username:
+        return ""
+    if not FB_PUBLIC_APP_TOKEN:
+        return ""
+
+    graph_url = (
+        "https://graph.facebook.com/" + quote(username)
+        + "?fields=id&access_token=" + quote(FB_PUBLIC_APP_TOKEN)
+    )
+    try:
+        response = _get_text(graph_url, fetcher)
+        payload = json.loads(response.get("text") or "{}")
+        return _normalize_uid(payload.get("id")) if isinstance(payload, dict) else ""
+    except Exception:
+        return ""
+
+
+def _resolve_uid_from_facebook_url(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
+    direct_uid = _extract_uid_from_url(url_raw)
+    if direct_uid:
+        return direct_uid
+
+    probe_urls = _build_facebook_probe_urls(url_raw)
+    if not probe_urls:
+        return ""
+
+    for headers in _build_uid_probe_header_candidates():
+        for probe_url in probe_urls:
+            try:
+                response = _request_text("get", probe_url, fetcher=fetcher, headers=headers)
+            except Exception:
+                continue
+
+            uid_html = _extract_uid_from_html(response.get("text"))
+            if uid_html:
+                return uid_html
+
+            uid_final = _extract_uid_from_url(response.get("url"))
+            if uid_final:
+                return uid_final
+
+    return ""
+
+
+def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None) -> Dict:
+    uid = _normalize_uid(normalized.get("uid"))
+    username = _to_text(normalized.get("username")).strip()
+    profile_url = _to_text(normalized.get("profileUrl")).strip()
+    input_type = _to_text(normalized.get("inputType")).strip().lower()
+
+    if uid:
+        return {"uid": uid, "source": "direct_uid", "profileUrl": f"https://www.facebook.com/profile.php?id={uid}"}
+
+    resolved_uid = ""
+    resolve_source = ""
+    if profile_url:
+        resolved_uid = _resolve_uid_from_facebook_url(profile_url, fetcher)
+        if resolved_uid:
+            resolve_source = "url_probe"
+
+    if not resolved_uid and username:
+        resolved_uid = _resolve_uid_from_graph_username(username, fetcher)
+        if resolved_uid:
+            resolve_source = "graph_username"
+
+    if not resolved_uid and input_type == "username" and username:
+        fallback_url = "https://www.facebook.com/" + quote(username)
+        resolved_uid = _resolve_uid_from_facebook_url(fallback_url, fetcher)
+        if resolved_uid:
+            resolve_source = "username_probe"
+
+    if resolved_uid:
+        return {
+            "uid": resolved_uid,
+            "source": resolve_source or "resolved",
+            "profileUrl": f"https://www.facebook.com/profile.php?id={resolved_uid}",
+        }
+
+    return {"uid": "", "source": "uid_not_resolved", "profileUrl": profile_url}
 
 
 def _get_text(url: str, fetcher: Optional[Callable] = None) -> Dict:
@@ -416,9 +621,12 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
             "elapsedMs": _now_ms() - started,
         }
 
-    uid = normalized.get("uid", "")
     username = normalized.get("username", "")
-    profile_url = normalized.get("profileUrl", "")
+    resolved = _resolve_uid_for_check(normalized, fetcher)
+    uid = _to_text(resolved.get("uid")).strip()
+    uid_source = _to_text(resolved.get("source")).strip()
+    profile_url = _to_text(resolved.get("profileUrl") or normalized.get("profileUrl")).strip()
+
     probes = [
         _graph_picture_primary_probe(uid, fetcher),
         _graph_picture_app_token_probe(uid, fetcher),
@@ -434,6 +642,8 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         "input": raw_input,
         "inputType": normalized.get("inputType", ""),
         "uid": uid,
+        "uidResolved": bool(uid),
+        "uidSource": uid_source,
         "username": username,
         "profileUrl": profile_url,
         "status": chosen["status"],
