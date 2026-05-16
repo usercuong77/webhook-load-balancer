@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+import html as html_lib
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urlparse
@@ -11,12 +12,13 @@ from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-VERSION = "step06b_uid_resolve_debug_getuid_2026_05_16"
+VERSION = "step07b_profile_name_enrich_live_fallback_2026_05_16"
 REQUEST_TIMEOUT_SEC = 8
 FB_PUBLIC_APP_TOKEN = os.getenv("FB_PUBLIC_APP_TOKEN", "6628568379|c1e620fa708a1d5696fb991c1bde5662")
 EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
 EXTERNAL_CHECKER_API_KEY = os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
 UID_CHECKER_API_KEY = os.getenv("UID_CHECKER_API_KEY", "").strip()
+UID_CHECKER_FB_COOKIES_JSON = os.getenv("UID_CHECKER_FB_COOKIES_JSON", "").strip()
 TELEGRAM_RELAY_TARGET_URL = os.getenv(
     "TELEGRAM_RELAY_TARGET_URL",
     "https://script.google.com/macros/s/AKfycbyfgY-Dt5vmus2nbCROMIsNOWN0ddDKDnYTaYrQY2SdeUdlMrsCjOnLujB4h7OK3x8/exec",
@@ -56,6 +58,27 @@ DEFAULT_AVATAR_MARKERS = (
     "q_silhouette",
 )
 
+PROFILE_NAME_BLOCKLIST = (
+    "facebook",
+    "error",
+    "sorry",
+    "log in",
+    "login",
+    "login or sign up",
+    "join facebook",
+    "sign up",
+    "unsupported browser",
+    "trinh duyet nay khong duoc ho tro",
+    "dang nhap",
+    "dang ky",
+    "message",
+    "friend",
+    "notifications",
+    "watch",
+    "marketplace",
+    "meta",
+)
+
 UID_SCRAPE_PATTERNS = (
     r'"userID"\s*:\s*"(\d{8,20})"',
     r'"profile_id"\s*:\s*(\d{8,20})',
@@ -82,6 +105,7 @@ class ProbeResult:
     http_status: int
     reason: str
     url: str
+    profile_name: str = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -91,6 +115,7 @@ class ProbeResult:
             "httpStatus": self.http_status,
             "reason": self.reason,
             "url": self.url,
+            "profileName": self.profile_name,
         }
 
 
@@ -100,6 +125,82 @@ def _now_ms() -> int:
 
 def _to_text(value) -> str:
     return "" if value is None else str(value)
+
+
+def _normalize_cookie_map(cookies_raw) -> Dict[str, str]:
+    if not isinstance(cookies_raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for key, value in cookies_raw.items():
+        cookie_key = _to_text(key).strip()
+        cookie_value = _to_text(value).strip()
+        if cookie_key and cookie_value:
+            out[cookie_key] = cookie_value
+    return out
+
+
+def _load_default_name_probe_cookies() -> Dict[str, str]:
+    raw = UID_CHECKER_FB_COOKIES_JSON
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(parsed, list):
+        for item in parsed:
+            normalized = _normalize_cookie_map(item)
+            if normalized:
+                return normalized
+        return {}
+    return _normalize_cookie_map(parsed)
+
+
+DEFAULT_NAME_PROBE_COOKIES = _load_default_name_probe_cookies()
+
+
+def _clean_profile_name_candidate(raw_name: Optional[str]) -> str:
+    name = html_lib.unescape(_to_text(raw_name))
+    if not name:
+        return ""
+    name = re.sub(r"<[^>]+>", " ", name)
+    name = re.sub(r"\s+", " ", name).strip(" \t\r\n-–|")
+    name = re.sub(r"\s+\|\s*facebook.*$", "", name, flags=re.I)
+    name = re.sub(r"\s*-\s*facebook.*$", "", name, flags=re.I)
+    name = re.sub(r"\s*·\s*facebook.*$", "", name, flags=re.I)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _is_valid_profile_name(raw_name: Optional[str]) -> bool:
+    name = _clean_profile_name_candidate(raw_name)
+    if len(name) < 2 or len(name) > 90:
+        return False
+    low = name.lower()
+    for marker in PROFILE_NAME_BLOCKLIST:
+        if marker in low:
+            return False
+    return any(ch.isalpha() for ch in name)
+
+
+def _extract_profile_name_from_html(html_raw: Optional[str]) -> str:
+    html = _to_text(html_raw)
+    if not html:
+        return ""
+
+    patterns = (
+        r'<meta[^>]+\bproperty=["\']og:title["\'][^>]+\bcontent=["\']([^"\']+)["\']',
+        r'<meta[^>]+\bcontent=["\']([^"\']+)["\'][^>]+\bproperty=["\']og:title["\']',
+        r"<title[^>]*>(.*?)</title>",
+        r"<h1[^>]*>(.*?)</h1>",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.I | re.S)
+        if not match:
+            continue
+        candidate = _clean_profile_name_candidate(match.group(1))
+        if _is_valid_profile_name(candidate):
+            return candidate
+    return ""
 
 
 def _normalize_input(raw_input: str) -> Dict:
@@ -444,8 +545,13 @@ def _resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None)
     return {"uid": "", "source": "uid_not_resolved", "profileUrl": profile_url}
 
 
-def _get_text(url: str, fetcher: Optional[Callable] = None) -> Dict:
-    return _request_text("get", url, fetcher=fetcher)
+def _get_text(
+    url: str,
+    fetcher: Optional[Callable] = None,
+    headers: Optional[Dict] = None,
+    cookies: Optional[Dict[str, str]] = None,
+) -> Dict:
+    return _request_text("get", url, fetcher=fetcher, headers=headers, cookies=cookies)
 
 
 def _request_text(
@@ -455,10 +561,12 @@ def _request_text(
     json_payload: Optional[Dict] = None,
     data: Optional[str] = None,
     headers: Optional[Dict] = None,
+    cookies: Optional[Dict[str, str]] = None,
 ) -> Dict:
     request_headers = {"User-Agent": USER_AGENT, "Accept-Language": "vi,en-US;q=0.9,en;q=0.8"}
     if headers:
         request_headers.update(headers)
+    request_cookies = _normalize_cookie_map(cookies)
     if fetcher is None:
         response = requests.request(
             method.upper(),
@@ -468,6 +576,7 @@ def _request_text(
             headers=request_headers,
             json=json_payload,
             data=data,
+            cookies=request_cookies or None,
         )
     else:
         response = fetcher(
@@ -478,6 +587,7 @@ def _request_text(
             json=json_payload,
             data=data,
             method=method,
+            cookies=request_cookies or None,
         )
     return {
         "status_code": int(getattr(response, "status_code", 0) or 0),
@@ -487,30 +597,36 @@ def _request_text(
     }
 
 
-def _public_profile_probe(name: str, url: str, fetcher: Optional[Callable] = None) -> ProbeResult:
+def _public_profile_probe(
+    name: str,
+    url: str,
+    fetcher: Optional[Callable] = None,
+    cookies: Optional[Dict[str, str]] = None,
+) -> ProbeResult:
     try:
-        response = _get_text(url, fetcher)
+        response = _get_text(url, fetcher, cookies=cookies)
     except Exception as exc:
         return ProbeResult(name, "unknown", "weak", 0, f"fetch_error:{exc}", url)
 
     http_status = response["status_code"]
     body = response["text"].lower()
+    profile_name = _extract_profile_name_from_html(response["text"])
 
     if any(marker in body for marker in DEAD_MARKERS):
-        return ProbeResult(name, "dead", "strong", http_status, "dead_marker", response["url"])
+        return ProbeResult(name, "dead", "strong", http_status, "dead_marker", response["url"], profile_name)
 
     if http_status in (404, 410):
-        return ProbeResult(name, "unknown", "weak", http_status, "http_not_found_without_dead_marker", response["url"])
+        return ProbeResult(name, "unknown", "weak", http_status, "http_not_found_without_dead_marker", response["url"], profile_name)
 
     if http_status >= 500:
-        return ProbeResult(name, "unknown", "weak", http_status, "server_error", response["url"])
+        return ProbeResult(name, "unknown", "weak", http_status, "server_error", response["url"], profile_name)
 
     if http_status in (200, 301, 302):
         if any(marker in body for marker in LIVE_MARKERS):
-            return ProbeResult(name, "live", "weak", http_status, "live_marker_or_auth_wall", response["url"])
-        return ProbeResult(name, "live", "weak", http_status, "http_ok_no_dead_marker", response["url"])
+            return ProbeResult(name, "live", "weak", http_status, "live_marker_or_auth_wall", response["url"], profile_name)
+        return ProbeResult(name, "live", "weak", http_status, "http_ok_no_dead_marker", response["url"], profile_name)
 
-    return ProbeResult(name, "unknown", "weak", http_status, "unclassified_http", response["url"])
+    return ProbeResult(name, "unknown", "weak", http_status, "unclassified_http", response["url"], profile_name)
 
 
 def _mobile_url(profile_url: str, uid: str, username: str) -> str:
@@ -589,6 +705,12 @@ def _graphql_node_probe(uid: str, fetcher: Optional[Callable] = None) -> ProbeRe
     except Exception:
         payload = {}
     node = payload.get(uid) if isinstance(payload, dict) else None
+    profile_name_raw = ""
+    if isinstance(node, dict):
+        profile_name_raw = _to_text(node.get("name"))
+    elif isinstance(node, str):
+        profile_name_raw = node
+    profile_name = _clean_profile_name_candidate(profile_name_raw) if _is_valid_profile_name(profile_name_raw) else ""
     is_dead = node is None or node == ""
     return ProbeResult(
         "graphql_node",
@@ -597,6 +719,7 @@ def _graphql_node_probe(uid: str, fetcher: Optional[Callable] = None) -> ProbeRe
         http_status,
         "graphql_node_empty" if is_dead else "graphql_node_found",
         response["url"],
+        profile_name,
     )
 
 
@@ -629,6 +752,7 @@ def _external_checker_probe(uid: str, profile_url: str, fetcher: Optional[Callab
     if not status:
         status = "unknown"
     reason = payload.get("reason") or payload.get("message") or payload.get("detail") or "-"
+    profile_name = _pick_profile_name_from_external_payload(payload)
     return ProbeResult(
         "external_checker",
         status,
@@ -636,6 +760,7 @@ def _external_checker_probe(uid: str, profile_url: str, fetcher: Optional[Callab
         int(payload.get("httpCode") or payload.get("http_code") or http_status or 0),
         "external:" + _to_text(reason),
         response["url"],
+        profile_name,
     )
 
 
@@ -647,6 +772,29 @@ def _normalize_external_status(value) -> str:
         return "dead"
     if text in ("unknown", "error", "timeout", "checkpoint"):
         return "unknown"
+    return ""
+
+
+def _pick_profile_name_from_external_payload(payload: Dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    candidates = [
+        payload.get("profileName"),
+        payload.get("profile_name"),
+        payload.get("name"),
+        payload.get("fullName"),
+        payload.get("displayName"),
+    ]
+    signals = payload.get("signals")
+    if isinstance(signals, dict):
+        for key in ("m", "touch", "www", "mbasic", "public", "url"):
+            signal = signals.get(key)
+            if isinstance(signal, dict):
+                candidates.append(signal.get("name"))
+
+    for candidate in candidates:
+        if _is_valid_profile_name(candidate):
+            return _clean_profile_name_candidate(candidate)
     return ""
 
 
@@ -710,6 +858,107 @@ def _choose_result(probes: List[ProbeResult]) -> Dict:
     }
 
 
+def _pick_profile_name_from_probes(probes: List[ProbeResult], final_status: str) -> Dict[str, str]:
+    if _to_text(final_status).lower() != "live":
+        return {"profileName": "", "profileNameSource": ""}
+
+    by_name = {probe.name: probe for probe in probes}
+    preferred_order = (
+        "external_checker",
+        "html_mobile_fallback",
+        "graphql_node",
+        "graph_picture_primary",
+        "graph_picture_app_token",
+    )
+    for source in preferred_order:
+        probe = by_name.get(source)
+        if probe and _is_valid_profile_name(probe.profile_name):
+            return {
+                "profileName": _clean_profile_name_candidate(probe.profile_name),
+                "profileNameSource": source,
+            }
+
+    for probe in probes:
+        if _is_valid_profile_name(probe.profile_name):
+            return {
+                "profileName": _clean_profile_name_candidate(probe.profile_name),
+                "profileNameSource": probe.name,
+            }
+
+    return {"profileName": "", "profileNameSource": ""}
+
+
+def _resolve_profile_name_from_graph(uid_raw: Optional[str], fetcher: Optional[Callable] = None) -> str:
+    uid = _normalize_uid(uid_raw)
+    if not uid or not FB_PUBLIC_APP_TOKEN:
+        return ""
+    url = (
+        "https://graph.facebook.com/" + quote(uid)
+        + "?fields=name&access_token=" + quote(FB_PUBLIC_APP_TOKEN)
+    )
+    try:
+        response = _get_text(url, fetcher)
+        payload = json.loads(response.get("text") or "{}")
+        if not isinstance(payload, dict):
+            return ""
+        name = payload.get("name")
+        if _is_valid_profile_name(name):
+            return _clean_profile_name_candidate(name)
+        return ""
+    except Exception:
+        return ""
+
+
+def _enrich_profile_name_for_live_profile(
+    profile_url: str,
+    uid: str,
+    username: str,
+    fetcher: Optional[Callable] = None,
+) -> Dict[str, str]:
+    graph_name = _resolve_profile_name_from_graph(uid, fetcher)
+    if graph_name:
+        return {"profileName": graph_name, "profileNameSource": "graph_name"}
+
+    normalized_url = _normalize_url_input(profile_url)
+    candidates: List[str] = []
+    if normalized_url:
+        candidates.append(normalized_url)
+    if uid:
+        candidates.append(f"https://m.facebook.com/profile.php?id={uid}")
+        candidates.append(f"https://touch.facebook.com/profile.php?id={uid}")
+        candidates.append(f"https://www.facebook.com/profile.php?id={uid}")
+    elif username:
+        safe_username = quote(_to_text(username).strip().lstrip("@").strip("/"))
+        candidates.append(f"https://m.facebook.com/{safe_username}")
+        candidates.append(f"https://touch.facebook.com/{safe_username}")
+        candidates.append(f"https://www.facebook.com/{safe_username}")
+
+    seen = set()
+    unique_candidates: List[str] = []
+    for item in candidates:
+        key = _to_text(item).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(key)
+
+    cookie_rounds: List[Dict[str, Dict[str, str]]] = [{"source": "no_cookie", "cookies": {}}]
+    if DEFAULT_NAME_PROBE_COOKIES:
+        cookie_rounds.append({"source": "with_cookie", "cookies": DEFAULT_NAME_PROBE_COOKIES})
+
+    for cookie_round in cookie_rounds:
+        cookies = cookie_round.get("cookies") or {}
+        cookie_source = _to_text(cookie_round.get("source")) or "no_cookie"
+        for index, url in enumerate(unique_candidates[:3], start=1):
+            probe = _public_profile_probe(f"name_enrich_{index}", url, fetcher, cookies=cookies)
+            if _is_valid_profile_name(probe.profile_name):
+                return {
+                    "profileName": _clean_profile_name_candidate(probe.profile_name),
+                    "profileNameSource": f"name_enrich_{index}:{cookie_source}",
+                }
+    return {"profileName": "", "profileNameSource": ""}
+
+
 def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
     started = _now_ms()
     normalized = _normalize_input(raw_input)
@@ -738,6 +987,11 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
     ]
 
     chosen = _choose_result(probes)
+    profile_name_pick = _pick_profile_name_from_probes(probes, chosen["status"])
+    if not profile_name_pick["profileName"] and _to_text(chosen["status"]).lower() == "live":
+        enriched_name = _enrich_profile_name_for_live_profile(profile_url, uid, username, fetcher)
+        if enriched_name["profileName"]:
+            profile_name_pick = enriched_name
     return {
         "ok": True,
         "version": VERSION,
@@ -753,6 +1007,8 @@ def check_live_die(raw_input: str, fetcher: Optional[Callable] = None) -> Dict:
         "source": chosen["source"],
         "httpStatus": chosen["httpStatus"],
         "reason": chosen["reason"],
+        "profileName": profile_name_pick["profileName"],
+        "profileNameSource": profile_name_pick["profileNameSource"],
         "probeCount": len(probes),
         "probes": [probe.to_dict() for probe in probes],
         "elapsedMs": _now_ms() - started,
