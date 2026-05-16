@@ -27,6 +27,18 @@ LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
+PROBE_MODE_TO_NAME = {
+    "1": "graph_picture_primary",
+    "2": "graph_picture_app_token",
+    "3": "graphql_node",
+    "4": "external_checker",
+    "5": "html_mobile_fallback",
+}
+PROBE_NAME_TO_MODE = dict((name, mode) for mode, name in PROBE_MODE_TO_NAME.items())
+ALL_PROBE_MODES = ("1", "2", "3", "4", "5")
+ALL_PROBE_NAMES = tuple(PROBE_MODE_TO_NAME[mode] for mode in ALL_PROBE_MODES)
+PROBE_MODE_SYNTAX = "1|2|3|4|5|all"
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -84,8 +96,42 @@ def _log_probe_diagnostics(raw_input: str, uid: str, status: str, chosen_source:
         LOGGER.warning(json.dumps(payload, ensure_ascii=False))
 
 
-def _run_check_pipeline(raw_input: str, fetcher=None) -> Dict:
+def _normalize_probe_mode(mode_raw: Optional[str]) -> str:
+    mode = to_text(mode_raw).strip().lower()
+    if not mode or mode == "all" or mode == "*":
+        return "all"
+    if mode in PROBE_MODE_TO_NAME:
+        return mode
+    if mode in PROBE_NAME_TO_MODE:
+        return PROBE_NAME_TO_MODE[mode]
+    return "all"
+
+
+def _probe_names_for_mode(mode_key: str):
+    if mode_key == "all":
+        return list(ALL_PROBE_NAMES)
+    probe_name = PROBE_MODE_TO_NAME.get(mode_key)
+    return [probe_name] if probe_name else list(ALL_PROBE_NAMES)
+
+
+def _run_probe_by_name(probe_name: str, uid: str, profile_url: str, username: str, fetcher=None):
+    if probe_name == "graph_picture_primary":
+        return probe_core.graph_picture_primary_probe(uid, fetcher)
+    if probe_name == "graph_picture_app_token":
+        return probe_core.graph_picture_app_token_probe(uid, fetcher)
+    if probe_name == "graphql_node":
+        return probe_core.graphql_node_probe(uid, fetcher)
+    if probe_name == "external_checker":
+        return probe_core.external_checker_probe(uid, profile_url, fetcher)
+    if probe_name == "html_mobile_fallback":
+        return probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
+    return probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
+
+
+def _run_check_pipeline(raw_input: str, fetcher=None, probe_mode_raw: Optional[str] = "all") -> Dict:
     started = _now_ms()
+    mode_key = _normalize_probe_mode(probe_mode_raw)
+    selected_probe_names = _probe_names_for_mode(mode_key)
     normalized = parser_normalize_input(raw_input)
     if not normalized.get("ok"):
         return {
@@ -94,6 +140,9 @@ def _run_check_pipeline(raw_input: str, fetcher=None) -> Dict:
             "status": "unknown",
             "confidence": "weak",
             "input": raw_input,
+            "requestedProbeMode": to_text(probe_mode_raw).strip().lower() or "all",
+            "appliedProbeMode": mode_key,
+            "enabledProbes": selected_probe_names,
             "elapsedMs": _now_ms() - started,
         }
 
@@ -105,13 +154,9 @@ def _run_check_pipeline(raw_input: str, fetcher=None) -> Dict:
     if not username:
         username = to_text(resolved.get("username")).strip()
 
-    probes = [
-        probe_core.graph_picture_primary_probe(uid, fetcher),
-        probe_core.graph_picture_app_token_probe(uid, fetcher),
-        probe_core.graphql_node_probe(uid, fetcher),
-        probe_core.external_checker_probe(uid, profile_url, fetcher),
-        probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher),
-    ]
+    probes = []
+    for probe_name in selected_probe_names:
+        probes.append(_run_probe_by_name(probe_name, uid, profile_url, username, fetcher))
 
     chosen = probe_core.choose_result(probes)
     profile_name_pick = probe_core.pick_profile_name_from_probes(probes, chosen["status"])
@@ -144,6 +189,9 @@ def _run_check_pipeline(raw_input: str, fetcher=None) -> Dict:
         "uidSource": uid_source,
         "username": username,
         "profileUrl": profile_url,
+        "requestedProbeMode": to_text(probe_mode_raw).strip().lower() or "all",
+        "appliedProbeMode": mode_key,
+        "enabledProbes": selected_probe_names,
         "status": chosen["status"],
         "confidence": chosen["confidence"],
         "source": chosen["source"],
@@ -158,8 +206,8 @@ def _run_check_pipeline(raw_input: str, fetcher=None) -> Dict:
     }
 
 
-def check_live_die(raw_input: str, fetcher=None) -> Dict:
-    return _run_check_pipeline(raw_input, fetcher)
+def check_live_die(raw_input: str, fetcher=None, probe_mode: Optional[str] = "all") -> Dict:
+    return _run_check_pipeline(raw_input, fetcher, probe_mode_raw=probe_mode)
 
 
 def build_root_status() -> Dict:
@@ -178,6 +226,7 @@ def build_root_status() -> Dict:
             "external_checker",
             "html_mobile_fallback",
         ],
+        "probeModeSyntax": PROBE_MODE_SYNTAX,
         "nameProbeCookieConfigured": bool(DEFAULT_NAME_PROBE_COOKIES),
         "telegramRelayConfigured": bool(TELEGRAM_RELAY_TARGET_URL),
     }
@@ -190,12 +239,14 @@ def health_status() -> Dict:
 def check_from_payload(payload: Optional[Dict]) -> Dict:
     safe_payload = payload if isinstance(payload, dict) else {}
     raw_input = safe_payload.get("input") or safe_payload.get("url") or safe_payload.get("uid") or ""
-    return check_live_die(raw_input)
+    probe_mode = safe_payload.get("probeMode") or safe_payload.get("mode") or "all"
+    return _run_check_pipeline(raw_input, probe_mode_raw=probe_mode)
 
 
 def check_from_query(query: Dict) -> Dict:
     raw_input = query.get("input") or query.get("url") or query.get("uid") or ""
-    return check_live_die(raw_input)
+    probe_mode = query.get("probeMode") or query.get("mode") or "all"
+    return _run_check_pipeline(raw_input, probe_mode_raw=probe_mode)
 
 
 def get_uid_payload(url: str, debug_mode: bool = False) -> Dict:

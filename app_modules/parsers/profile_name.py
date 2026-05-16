@@ -7,6 +7,7 @@ from typing import Optional
 PROFILE_NAME_BLOCKLIST = (
     "facebook",
     "error",
+    "l\u1ed7i",
     "sorry",
     "log in",
     "login",
@@ -30,16 +31,16 @@ def clean_profile_name_candidate(raw_name: Optional[str]) -> str:
     if not name:
         return ""
     name = re.sub(r"<[^>]+>", " ", name)
-    name = re.sub(r"\s+", " ", name).strip(" \t\r\n-â€“|")
+    name = re.sub(r"\s+", " ", name).strip(" \t\r\n-|")
     name = re.sub(r"\s+\|\s*facebook.*$", "", name, flags=re.I)
     name = re.sub(r"\s*-\s*facebook.*$", "", name, flags=re.I)
-    name = re.sub(r"\s*Â·\s*facebook.*$", "", name, flags=re.I)
+    name = re.sub(r"\s*\u00b7\s*facebook.*$", "", name, flags=re.I)
     return re.sub(r"\s+", " ", name).strip()
 
 
 def _latin_fold(raw: Optional[str]) -> str:
     text = "" if raw is None else str(raw)
-    text = text.replace("đ", "d").replace("Đ", "D")
+    text = text.replace("\u0111", "d").replace("\u0110", "D")
     normalized = unicodedata.normalize("NFD", text)
     return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
 
@@ -52,8 +53,9 @@ def is_valid_profile_name(raw_name: Optional[str]) -> bool:
     low_folded = _latin_fold(low)
     for marker in PROFILE_NAME_BLOCKLIST:
         marker_low = marker.lower()
-        marker_folded = _latin_fold(marker_low)
-        if marker_low in low or marker_folded in low_folded:
+        if marker_low in low:
+            return False
+        if marker_low.isascii() and _latin_fold(marker_low) in low_folded:
             return False
     return any(ch.isalpha() for ch in name)
 
