@@ -1,12 +1,10 @@
 import json
 import os
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Optional
 from urllib.parse import quote
 
-import requests
-
-from app_modules.config import FB_PUBLIC_APP_TOKEN, REQUEST_TIMEOUT_SEC, UID_CHECKER_FB_COOKIES_JSON
+from app_modules.config import FB_PUBLIC_APP_TOKEN, UID_CHECKER_FB_COOKIES_JSON
 from app_modules.http_client import get_text, request_text
 from app_modules.parsers.facebook_url import (
     build_facebook_probe_urls,
@@ -61,186 +59,6 @@ def _load_default_uid_probe_cookies() -> Dict[str, str]:
 
 
 DEFAULT_UID_PROBE_COOKIES = _load_default_uid_probe_cookies()
-
-
-COOKIE_UID_USER_AGENTS = (
-    (
-        "Mozilla/5.0 (Linux; U; Android 4.0.3; en-us; Galaxy Nexus Build/IML74K) "
-        "AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30"
-    ),
-    (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1"
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-)
-
-
-def _normalize_cookie_payload(payload) -> List[Dict[str, str]]:
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        if isinstance(payload.get("cookies"), list):
-            items = payload.get("cookies") or []
-        elif isinstance(payload.get("accounts"), list):
-            items = payload.get("accounts") or []
-        else:
-            items = [payload]
-    else:
-        items = []
-
-    accounts: List[Dict[str, str]] = []
-    for item in items:
-        normalized = _normalize_cookie_map(item)
-        if normalized and normalized.get("c_user") and normalized.get("xs"):
-            accounts.append(normalized)
-    return accounts
-
-
-def _load_uid_probe_cookie_accounts() -> List[Dict[str, str]]:
-    raw = to_text(UID_CHECKER_FB_COOKIES_JSON).strip().lstrip("\ufeff")
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        return []
-    return _normalize_cookie_payload(parsed)
-
-
-DEFAULT_UID_PROBE_COOKIE_ACCOUNTS = _load_uid_probe_cookie_accounts()
-
-
-def uid_cookie_pool_count() -> int:
-    return len(DEFAULT_UID_PROBE_COOKIE_ACCOUNTS)
-
-
-def _mask_cookie_id(cookie_map: Optional[Dict[str, str]]) -> str:
-    c_user = to_text((cookie_map or {}).get("c_user")).strip()
-    if len(c_user) <= 6:
-        return "***" if c_user else ""
-    return f"{c_user[:4]}***{c_user[-4:]}"
-
-
-def _cookie_header(cookie_map: Optional[Dict[str, str]]) -> str:
-    parts = []
-    for key, value in (cookie_map or {}).items():
-        clean_key = to_text(key).strip()
-        clean_value = to_text(value).strip()
-        if clean_key and clean_value:
-            parts.append(f"{clean_key}={clean_value}")
-    return "; ".join(parts)
-
-
-def _cookie_uid_probe_header_candidates(cookie_map: Dict[str, str]) -> List[Dict[str, str]]:
-    cookie_value = _cookie_header(cookie_map)
-    if not cookie_value:
-        return []
-    return [
-        {
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-            "Cookie": cookie_value,
-        }
-        for user_agent in COOKIE_UID_USER_AGENTS
-    ]
-
-
-def _cookie_probe_url_priority(url_raw: Optional[str]):
-    value = to_text(url_raw).lower()
-    if "mbasic.facebook.com" in value:
-        return (0, value)
-    if "m.facebook.com" in value:
-        return (1, value)
-    return (2, value)
-
-
-def _fetch_text_with_cookie_header(
-    url: str,
-    headers: Dict[str, str],
-    fetcher: Optional[Callable] = None,
-) -> Dict:
-    if fetcher is not None:
-        return request_text("get", url, fetcher=fetcher, headers=headers)
-    try:
-        response = requests.get(
-            url,
-            headers=dict(headers),
-            timeout=max(5, REQUEST_TIMEOUT_SEC),
-            allow_redirects=True,
-        )
-        return {
-            "status_code": int(getattr(response, "status_code", 0) or 0),
-            "url": to_text(getattr(response, "url", url)),
-            "text": to_text(getattr(response, "text", "")),
-        }
-    except requests.RequestException:
-        return {"status_code": 0, "url": url, "text": ""}
-
-
-def _resolve_uid_with_cookie_pool(url_raw: Optional[str], fetcher: Optional[Callable] = None) -> Dict:
-    probe_urls = sorted(build_facebook_probe_urls(url_raw), key=_cookie_probe_url_priority)
-    attempts = []
-    if not probe_urls:
-        return {"uid": "", "source": "uid_cookie_pool", "attempts": attempts, "resolvedUsername": "", "resolvedUrl": ""}
-    if not DEFAULT_UID_PROBE_COOKIE_ACCOUNTS:
-        return {
-            "uid": "",
-            "source": "uid_cookie_pool",
-            "attempts": attempts,
-            "reason": "no_usable_cookie_accounts",
-            "resolvedUsername": "",
-            "resolvedUrl": normalize_url_input(url_raw),
-        }
-
-    for index, cookie_map in enumerate(DEFAULT_UID_PROBE_COOKIE_ACCOUNTS):
-        account_uid = normalize_uid(cookie_map.get("c_user"))
-        for probe_url in probe_urls:
-            for headers in _cookie_uid_probe_header_candidates(cookie_map):
-                response = _fetch_text_with_cookie_header(probe_url, headers, fetcher)
-                final_url = to_text(response.get("url"))
-                response_text = to_text(response.get("text"))
-                uid_html = extract_uid_from_html(response_text)
-                uid_final = extract_uid_from_url(final_url)
-                if uid_html and uid_html == account_uid:
-                    uid_html = ""
-                if uid_final and uid_final == account_uid:
-                    uid_final = ""
-                resolved_username = extract_username_slug_from_url(final_url) or extract_username_from_login_next(final_url)
-                attempt = {
-                    "url": probe_url,
-                    "status": int(response.get("status_code") or 0),
-                    "finalUrl": final_url,
-                    "ua": to_text(headers.get("User-Agent"))[:80],
-                    "cookieSource": "cookie_pool",
-                    "cookieIndex": index,
-                    "cookieAccount": _mask_cookie_id(cookie_map),
-                    "uidFromHtml": uid_html,
-                    "uidFromFinalUrl": uid_final,
-                }
-                attempts.append(attempt)
-                chosen_uid = uid_html or uid_final
-                if chosen_uid:
-                    return {
-                        "uid": chosen_uid,
-                        "source": "uid_cookie_pool",
-                        "attempts": attempts,
-                        "resolvedUsername": resolved_username,
-                        "resolvedUrl": f"https://www.facebook.com/profile.php?id={chosen_uid}",
-                    }
-
-    return {
-        "uid": "",
-        "source": "uid_cookie_pool",
-        "attempts": attempts,
-        "reason": "uid_not_found_after_cookie_pool",
-        "resolvedUsername": "",
-        "resolvedUrl": normalize_url_input(url_raw),
-    }
 
 
 def _is_login_like_url(url_raw: Optional[str]) -> bool:
@@ -403,6 +221,10 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
     attempts = []
     derived_username = extract_username_slug_from_url(url_raw)
     cookie_rounds = [("no_cookie", {})]
+    # For username links we can try cookie round, but only accept UID when
+    # final URL/body is consistent with the requested slug.
+    if DEFAULT_UID_PROBE_COOKIES and (share_token or slug_from_input):
+        cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
 
     for cookie_source, cookie_map in cookie_rounds:
         for headers in build_uid_probe_header_candidates():
@@ -507,28 +329,11 @@ def resolve_uid_from_facebook_url_debug(url_raw: Optional[str], fetcher: Optiona
                         "resolvedUrl": f"https://www.facebook.com/profile.php?id={uid_final}",
                     }
 
-    cookie_pool_result = _resolve_uid_with_cookie_pool(url_raw, fetcher)
-    cookie_pool_attempts = cookie_pool_result.get("attempts") or []
-    if cookie_pool_attempts:
-        attempts.extend(cookie_pool_attempts)
-    cookie_pool_uid = normalize_uid(cookie_pool_result.get("uid"))
-    if cookie_pool_uid:
-        resolved_username = to_text(cookie_pool_result.get("resolvedUsername")).strip()
-        if share_token:
-            _uid_cache_put("share:" + share_token.lower(), cookie_pool_uid, resolved_username)
-        if resolved_username:
-            _uid_cache_put("username:" + resolved_username.lower(), cookie_pool_uid, resolved_username)
-        return {
-            "uid": cookie_pool_uid,
-            "source": "uid_cookie_pool",
-            "attempts": attempts,
-            "resolvedUsername": resolved_username,
-            "resolvedUrl": f"https://www.facebook.com/profile.php?id={cookie_pool_uid}",
-        }
-
     if derived_username:
         username_probe_url = "https://www.facebook.com/" + quote(derived_username)
         username_cookie_rounds = [("no_cookie", {})]
+        if DEFAULT_UID_PROBE_COOKIES and (share_token or slug_from_input):
+            username_cookie_rounds.append(("with_cookie", DEFAULT_UID_PROBE_COOKIES))
         for cookie_source, cookie_map in username_cookie_rounds:
             try:
                 response = request_text(
@@ -634,15 +439,17 @@ def resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None) 
     resolved_username = ""
     resolve_source = ""
     if profile_url:
-        debug_result = resolve_uid_from_facebook_url_debug(profile_url, fetcher)
-        resolved_uid = to_text(debug_result.get("uid")).strip()
-        if not resolved_username:
-            resolved_username = to_text(debug_result.get("resolvedUsername")).strip()
-        resolved_url = to_text(debug_result.get("resolvedUrl")).strip()
-        if resolved_url:
-            profile_url = resolved_url
-        if resolved_uid:
-            resolve_source = to_text(debug_result.get("source")).strip() or "url_probe"
+        for _ in range(2):
+            debug_result = resolve_uid_from_facebook_url_debug(profile_url, fetcher)
+            resolved_uid = to_text(debug_result.get("uid")).strip()
+            if not resolved_username:
+                resolved_username = to_text(debug_result.get("resolvedUsername")).strip()
+            resolved_url = to_text(debug_result.get("resolvedUrl")).strip()
+            if resolved_url:
+                profile_url = resolved_url
+            if resolved_uid:
+                resolve_source = to_text(debug_result.get("source")).strip() or "url_probe"
+                break
 
     username_candidate = username or resolved_username
     if not resolved_uid and username_candidate:
@@ -652,13 +459,12 @@ def resolve_uid_for_check(normalized: Dict, fetcher: Optional[Callable] = None) 
 
     if not resolved_uid and username_candidate:
         fallback_url = "https://www.facebook.com/" + quote(username_candidate)
-        if normalize_url_input(fallback_url).rstrip("/") != normalize_url_input(profile_url).rstrip("/"):
-            debug_result = resolve_uid_from_facebook_url_debug(fallback_url, fetcher)
-            resolved_uid = to_text(debug_result.get("uid")).strip()
-            if not resolved_username:
-                resolved_username = to_text(debug_result.get("resolvedUsername")).strip()
-            if resolved_uid:
-                resolve_source = to_text(debug_result.get("source")).strip() or "username_probe"
+        debug_result = resolve_uid_from_facebook_url_debug(fallback_url, fetcher)
+        resolved_uid = to_text(debug_result.get("uid")).strip()
+        if not resolved_username:
+            resolved_username = to_text(debug_result.get("resolvedUsername")).strip()
+        if resolved_uid:
+            resolve_source = to_text(debug_result.get("source")).strip() or "username_probe"
 
     if resolved_uid:
         effective_username = username_candidate or resolved_username
