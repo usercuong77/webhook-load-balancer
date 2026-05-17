@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from typing import Dict, Optional
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -10,6 +11,7 @@ from app_modules.config import (
     TELEGRAM_RELAY_TIMEOUT_SEC,
     UID_CHECKER_API_KEY,
     UID_CHECKER_FB_COOKIES_JSON,
+    WEBHOOK_SHARED_SECRET,
 )
 from app_modules.parsers.facebook_url import normalize_input as parser_normalize_input
 from app_modules.parsers.facebook_url import to_text
@@ -358,12 +360,30 @@ def get_uid_payload(url: str, debug_mode: bool = False) -> Dict:
     return payload
 
 
+def telegram_relay_target_url() -> str:
+    if not TELEGRAM_RELAY_TARGET_URL or not WEBHOOK_SHARED_SECRET:
+        return TELEGRAM_RELAY_TARGET_URL
+
+    parsed = urlsplit(TELEGRAM_RELAY_TARGET_URL)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    for key in ("secret", "webhook_secret", "webhookSecret", "token"):
+        if key in query and any(str(value).strip() for value in query[key]):
+            return TELEGRAM_RELAY_TARGET_URL
+
+    pairs = []
+    for key, values in query.items():
+        for value in values:
+            pairs.append((key, value))
+    pairs.append(("secret", WEBHOOK_SHARED_SECRET))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), parsed.fragment))
+
+
 def relay_telegram_webhook(body: bytes, content_type: str) -> Dict:
     if not TELEGRAM_RELAY_TARGET_URL:
         return {"ok": False, "error": "telegram_relay_target_missing", "statusCode": 500}
     try:
         upstream = requests.post(
-            TELEGRAM_RELAY_TARGET_URL,
+            telegram_relay_target_url(),
             data=body,
             headers={"Content-Type": content_type},
             timeout=TELEGRAM_RELAY_TIMEOUT_SEC,

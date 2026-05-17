@@ -12,6 +12,7 @@ EXTERNAL_CHECKER_URL = os.getenv("EXTERNAL_CHECKER_URL", "").strip()
 EXTERNAL_CHECKER_API_KEY = os.getenv("EXTERNAL_CHECKER_API_KEY", "").strip()
 UID_CHECKER_API_KEY = os.getenv("UID_CHECKER_API_KEY", "").strip()
 UID_CHECKER_FB_COOKIES_JSON = os.getenv("UID_CHECKER_FB_COOKIES_JSON", "").strip()
+WEBHOOK_SHARED_SECRET = os.getenv("WEBHOOK_SHARED_SECRET", "").strip()
 TELEGRAM_RELAY_TARGET_URL = os.getenv(
     "TELEGRAM_RELAY_TARGET_URL",
     "https://script.google.com/macros/s/AKfycbyfgY-Dt5vmus2nbCROMIsNOWN0ddDKDnYTaYrQY2SdeUdlMrsCjOnLujB4h7OK3x8/exec",
