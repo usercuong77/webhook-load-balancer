@@ -20,10 +20,11 @@ from app_modules.probes import live_die_probes as probe_core
 from app_modules.resolvers.uid_resolver import (
     resolve_uid_for_check as resolver_resolve_uid_for_check,
     resolve_uid_from_facebook_url_debug as resolver_resolve_uid_from_facebook_url_debug,
+    uid_cookie_pool_count as resolver_uid_cookie_pool_count,
 )
 
 
-VERSION = "step21_wlb_secret_relay_2026_05_17"
+VERSION = "step22_wlb_uid_cookie_pool_fix_2026_05_17"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
@@ -147,11 +148,11 @@ def _force_binary_status(
 
     if not to_text(uid).strip():
         return {
-            "status": "unknown",
+            "status": "dead",
             "confidence": "weak",
-            "source": to_text(chosen.get("source")) or "binary_guard_uid_missing",
+            "source": "uid_resolver",
             "httpStatus": int(chosen.get("httpStatus") or 0),
-            "reason": "uid_unresolved_no_strong_signal:" + to_text(chosen.get("reason") or "no_stable_signal"),
+            "reason": "uid_unresolved_treated_as_die:" + to_text(chosen.get("reason") or "no_stable_signal"),
         }
 
     fallback_probe = probe_core.html_mobile_fallback_probe(profile_url, uid, username, fetcher)
@@ -324,6 +325,8 @@ def build_root_status() -> Dict:
         ],
         "probeModeSyntax": PROBE_MODE_SYNTAX,
         "nameProbeCookieConfigured": bool(DEFAULT_NAME_PROBE_COOKIES),
+        "uidCookiePoolConfigured": bool(resolver_uid_cookie_pool_count()),
+        "uidCookiePoolCount": resolver_uid_cookie_pool_count(),
         "telegramRelayConfigured": bool(TELEGRAM_RELAY_TARGET_URL),
         "telegramRelaySecretConfigured": bool(WEBHOOK_SHARED_SECRET),
         "telegramRelayTargetHasSecretParam": telegram_relay_target_has_secret_param(),
