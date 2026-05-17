@@ -23,7 +23,7 @@ from app_modules.resolvers.uid_resolver import (
 )
 
 
-VERSION = "step20_no_forced_dead_when_uid_missing_2026_05_17"
+VERSION = "step21_wlb_secret_relay_2026_05_17"
 
 LOGGER = logging.getLogger("checker.check_service")
 if not LOGGER.handlers:
@@ -325,6 +325,9 @@ def build_root_status() -> Dict:
         "probeModeSyntax": PROBE_MODE_SYNTAX,
         "nameProbeCookieConfigured": bool(DEFAULT_NAME_PROBE_COOKIES),
         "telegramRelayConfigured": bool(TELEGRAM_RELAY_TARGET_URL),
+        "telegramRelaySecretConfigured": bool(WEBHOOK_SHARED_SECRET),
+        "telegramRelayTargetHasSecretParam": telegram_relay_target_has_secret_param(),
+        "telegramRelayWillAttachSecret": bool(WEBHOOK_SHARED_SECRET) or telegram_relay_target_has_secret_param(),
     }
 
 
@@ -366,9 +369,8 @@ def telegram_relay_target_url() -> str:
 
     parsed = urlsplit(TELEGRAM_RELAY_TARGET_URL)
     query = parse_qs(parsed.query, keep_blank_values=True)
-    for key in ("secret", "webhook_secret", "webhookSecret", "token"):
-        if key in query and any(str(value).strip() for value in query[key]):
-            return TELEGRAM_RELAY_TARGET_URL
+    if _query_has_webhook_secret(query):
+        return TELEGRAM_RELAY_TARGET_URL
 
     pairs = []
     for key, values in query.items():
@@ -376,6 +378,20 @@ def telegram_relay_target_url() -> str:
             pairs.append((key, value))
     pairs.append(("secret", WEBHOOK_SHARED_SECRET))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(pairs), parsed.fragment))
+
+
+def telegram_relay_target_has_secret_param() -> bool:
+    if not TELEGRAM_RELAY_TARGET_URL:
+        return False
+    parsed = urlsplit(TELEGRAM_RELAY_TARGET_URL)
+    return _query_has_webhook_secret(parse_qs(parsed.query, keep_blank_values=True))
+
+
+def _query_has_webhook_secret(query: Dict) -> bool:
+    for key in ("secret", "webhook_secret", "webhookSecret", "token"):
+        if key in query and any(str(value).strip() for value in query[key]):
+            return True
+    return False
 
 
 def relay_telegram_webhook(body: bytes, content_type: str) -> Dict:
@@ -394,13 +410,16 @@ def relay_telegram_webhook(body: bytes, content_type: str) -> Dict:
         return {"ok": False, "error": f"telegram_relay_exception:{exc}", "statusCode": 502}
 
     status_code = int(getattr(upstream, "status_code", 0) or 0)
+    upstream_body = to_text(getattr(upstream, "text", ""))
     if 200 <= status_code < 300:
+        if "invalid_webhook_secret" in upstream_body:
+            return {"ok": False, "error": "telegram_relay_invalid_webhook_secret", "statusCode": 502}
         return {"ok": True, "statusCode": status_code}
     return {
         "ok": False,
         "error": "telegram_relay_http_error",
         "statusCode": status_code or 502,
-        "upstreamBody": to_text(getattr(upstream, "text", ""))[:500],
+        "upstreamBody": upstream_body[:500],
     }
 
 
